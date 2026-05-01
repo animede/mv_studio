@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Music Video Studio</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="css/music_video_studio.css?v=20260501prod" />
+</head>
+<body>
+  <div class="studio-shell">
+    <header class="studio-header">
+      <div>
+        <h1>Music Video Studio</h1>
+        <p class="studio-subtitle">プリセットを起点に、制作キャンバスとSTEP制作・編集エリアを行き来しながらMVを構築できます。</p>
+      </div>
+    </header>
+
+    <main class="studio-main">
+      <section class="studio-workspace-grid">
+        <article class="panel panel-canvas">
+          <div class="panel-header">
+            <div>
+              <p class="panel-kicker">制作キャンバス</p>
+              <h2>前回の状態を維持</h2>
+            </div>
+            <span class="status-pill" id="resumeStatus">保存準備中</span>
+          </div>
+
+          <div class="canvas-card" id="canvasSummaryCard">
+            <div class="canvas-title-row">
+              <div>
+                <div class="canvas-label">現在のキャンバス</div>
+                <h3 id="canvasTitle">新しいキャンバス</h3>
+              </div>
+              <div class="canvas-meta" id="canvasUpdatedAt">未保存</div>
+            </div>
+
+            <label class="field-label" for="canvasNameInput">キャンバス名</label>
+            <input id="canvasNameInput" class="text-input" type="text" placeholder="例: 青い夜のMVラフ" maxlength="80" />
+
+            <div class="preset-control-row canvas-control-row">
+              <div class="preset-select-group production-type-selector">
+                <label class="field-label" for="presetSelect">制作タイプ</label>
+                <select id="presetSelect" class="select-input"></select>
+              </div>
+            </div>
+
+            <div class="canvas-summary-grid">
+              <div class="summary-card summary-card-primary">
+                <span class="summary-key">選択プリセット</span>
+                <strong id="summaryPreset">未選択</strong>
+              </div>
+              <div class="summary-card summary-card-plan">
+                <span class="summary-key">制作実行プラン</span>
+                <strong id="summaryMode">新規作成</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-key">選択STEP</span>
+                <strong id="summaryStep">未選択</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-key">次の見どころ</span>
+                <strong id="summaryHint">プリセットを選択してください</strong>
+              </div>
+            </div>
+
+            <div class="canvas-actions">
+              <button id="newCanvasBtn" class="primary-btn" type="button">新規作成</button>
+              <button id="resumeCanvasBtn" class="ghost-btn" type="button">前回のキャンバスを復元</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel panel-preset">
+          <div class="panel-header">
+            <div>
+              <h2>制作フロープラン選択</h2>
+            </div>
+          </div>
+
+          <div class="preset-overview" id="presetOverview"></div>
+          <div class="flow-preview" id="flowPreview"></div>
+        </article>
+
+        <section class="detail-columns">
+          <article class="panel panel-detail">
+            <div class="panel-header sticky-header">
+              <div>
+                <p class="panel-kicker">STEP制作・編集エリア</p>
+                <h2 id="detailTitle">STEPを選択してください</h2>
+                <p class="detail-subtitle" id="detailSubtitle" hidden>上部フローからクリックすると、サブフローや設定を表示します。</p>
+              </div>
+            </div>
+
+            <div class="detail-step-summary" id="detailStepSummary" hidden></div>
+
+            <div class="detail-body" id="detailBody">
+              <div class="empty-state">
+                <div class="empty-icon">🎬</div>
+                <h3>まずはプリセットを選択</h3>
+                <p>フローの全体像と、選択STEPに対応する大きな作業領域をここに表示します。</p>
+              </div>
+            </div>
+          </article>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="image-preview-modal hidden" id="imagePreviewModal" aria-hidden="true">
+    <div class="image-preview-backdrop" data-image-preview-close></div>
+    <div class="image-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
+      <div class="image-preview-header">
+        <strong id="imagePreviewTitle">画像プレビュー</strong>
+        <button id="imagePreviewCloseBtn" class="detail-action-btn secondary compact" type="button">閉じる</button>
+      </div>
+      <div class="image-preview-body">
+        <img id="imagePreviewModalImage" src="" alt="拡大画像" />
+      </div>
+      <div class="image-preview-caption" id="imagePreviewCaption">プレビュー画像</div>
+    </div>
+  </div>
+
+  <script src="js/music_video_studio.js?v=20260501prod"></script>
+</body>
+</html>
