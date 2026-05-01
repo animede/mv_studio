@@ -3031,6 +3031,61 @@ async def register_production_ref_image(
     }
 
 
+@app.delete("/api/v1/production/ref-images/{name}")
+def delete_production_ref_image(name: str, client_session_id: Optional[str] = None):
+    normalized_name = str(name or "").strip().lstrip("@")
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    idx = _read_preview_ref_index(client_session_id)
+    data = idx.pop(normalized_name, None)
+    deleted_file = False
+
+    if data and isinstance(data, dict):
+        filename = _safe_name(str(data.get("filename") or ""))
+        if filename:
+            file_path = _preview_ref_images_dir(client_session_id) / filename
+            try:
+                if file_path.exists() and file_path.is_file():
+                    file_path.unlink()
+                    deleted_file = True
+            except Exception:
+                deleted_file = False
+        _write_preview_ref_index(idx, client_session_id)
+        return {
+            "success": True,
+            "name": normalized_name,
+            "deleted_file": deleted_file,
+        }
+
+    # Backward-compatible global registry cleanup for older shared registrations.
+    if REF_IMAGES_INDEX.exists():
+        try:
+            loaded = json.loads(REF_IMAGES_INDEX.read_text(encoding="utf-8"))
+        except Exception:
+            loaded = {}
+        if isinstance(loaded, dict) and normalized_name in loaded:
+            data = loaded.pop(normalized_name, None)
+            if isinstance(data, dict):
+                filename = _safe_name(str(data.get("filename") or ""))
+                if filename:
+                    file_path = REF_IMAGES_DIR / filename
+                    try:
+                        if file_path.exists() and file_path.is_file():
+                            file_path.unlink()
+                            deleted_file = True
+                    except Exception:
+                        deleted_file = False
+            REF_IMAGES_INDEX.write_text(json.dumps(loaded, ensure_ascii=False, indent=2), encoding="utf-8")
+            return {
+                "success": True,
+                "name": normalized_name,
+                "deleted_file": deleted_file,
+            }
+
+    raise HTTPException(status_code=404, detail=f"Character not found: {normalized_name}")
+
+
 @app.post("/api/v1/production/upload-ref-slot")
 async def upload_production_ref_slot(
     client_session_id: Optional[str] = Form(None),

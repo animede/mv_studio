@@ -3763,12 +3763,18 @@
 
     const charactersMarkup = characters.length ? characters.map((item) => {
       const active = String(item.token || '') === selectedToken;
+      const name = String(item.name || '').trim();
       return `
-        <button class="character-registry-card ${active ? 'active' : ''}" type="button" data-character-token="${escapeHtml(item.token || '')}">
-          ${item.preview_url ? `<img src="${escapeHtml(item.preview_url)}" alt="${escapeHtml(item.name || '')}" />` : ''}
-          <strong>${escapeHtml(item.name || '')}</strong>
-          <span>${escapeHtml(item.token || '')}</span>
-        </button>
+        <article class="character-registry-card ${active ? 'active' : ''}">
+          <button class="character-registry-select character-registry-preview" type="button" data-character-token="${escapeHtml(item.token || '')}">
+            ${item.preview_url ? `<img src="${escapeHtml(item.preview_url)}" alt="${escapeHtml(name)}" />` : '<div class="character-slot-placeholder">画像なし</div>'}
+          </button>
+          <button class="detail-action-btn secondary compact character-delete-btn" type="button" data-character-delete="${escapeHtml(name)}" aria-label="${escapeHtml(name)} を削除">削除</button>
+          <button class="character-registry-select character-registry-meta" type="button" data-character-token="${escapeHtml(item.token || '')}">
+            <strong>${escapeHtml(name)}</strong>
+            <span>${escapeHtml(item.token || '')}</span>
+          </button>
+        </article>
       `;
     }).join('') : '<p class="field-help">登録済みキャラクタはまだありません。</p>';
 
@@ -4153,6 +4159,35 @@
       state.characterStep.imagePrompt = `${state.characterStep.imagePrompt ? `${state.characterStep.imagePrompt}\n` : ''}${state.characterStep.selectedCharacterToken}`;
     }
     setCharacterNotice(`キャラクタ「${name}」を登録しました`, 'success');
+    state.canvas.updatedAt = Date.now();
+    await refreshCharacterRegistry({ rerender: false });
+    renderDetail();
+    scheduleSave();
+  }
+
+  async function deleteRegisteredCharacter(name) {
+    const normalizedName = String(name || '').trim().replace(/^@+/, '');
+    if (!normalizedName) return;
+    const ok = window.confirm(`登録キャラクタ「${normalizedName}」を削除しますか？\nこの操作は一覧登録と登録画像ファイルを削除します。`);
+    if (!ok) return;
+
+    const response = await fetch(`/api/v1/production/ref-images/${encodeURIComponent(normalizedName)}?client_session_id=${encodeURIComponent(getSessionId())}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      const payload = await response.text();
+      throw new Error(`HTTP ${response.status}: ${payload}`);
+    }
+
+    const token = `@${normalizedName}`;
+    if (state.characterStep.selectedCharacterToken === token) {
+      state.characterStep.selectedCharacterToken = '';
+    }
+    state.characterStep.imagePrompt = String(state.characterStep.imagePrompt || '')
+      .split('\n')
+      .filter((line) => line.trim() !== token)
+      .join('\n');
+    setCharacterNotice(`キャラクタ「${normalizedName}」を削除しました`, 'success');
     state.canvas.updatedAt = Date.now();
     await refreshCharacterRegistry({ rerender: false });
     renderDetail();
@@ -4611,6 +4646,18 @@
         setCharacterNotice(`ref${index + 1} をクリアしました`, 'info');
         renderDetail();
         scheduleSave();
+        return;
+      }
+
+      const characterDeleteButton = event.target.closest('[data-character-delete]');
+      if (characterDeleteButton) {
+        const name = String(characterDeleteButton.getAttribute('data-character-delete') || '');
+        try {
+          await deleteRegisteredCharacter(name);
+        } catch (error) {
+          setCharacterNotice(error.message || 'キャラクタ削除に失敗しました', 'warning');
+          renderDetail();
+        }
         return;
       }
 
