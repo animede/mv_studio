@@ -4109,7 +4109,8 @@ async def production_vlm_analyze(request: PreviewVLMAnalyzeRequest):
 def production_character_image(request: PreviewCharacterImageRequest):
     source_images = [str(item or "").strip() for item in request.input_images][:3]
     source_images = [item for item in source_images if item]
-    prompt = _wrap_qwen_2511_edit_instruction_prompt(request.prompt)
+    raw_prompt = str(request.prompt or "").strip()
+    prompt = _wrap_qwen_2511_edit_instruction_prompt(raw_prompt) if source_images else raw_prompt
 
     print(
         "[production] character-image request",
@@ -4124,14 +4125,12 @@ def production_character_image(request: PreviewCharacterImageRequest):
         },
     )
 
-    if not source_images:
-        raise HTTPException(status_code=400, detail="At least one input image is required")
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
 
     started = time.time()
     synced_images = [_sync_input_image_to_comfy_input(name, request.client_session_id) for name in source_images]
-    workflow_name = _resolve_qwen_2511_workflow_variant(len(synced_images))
+    workflow_name = _resolve_qwen_2511_workflow_variant(len(synced_images)) if synced_images else "qwen_t2i_2512_lightning4"
     print(
         "[production] character-image resolved",
         {
@@ -4145,7 +4144,7 @@ def production_character_image(request: PreviewCharacterImageRequest):
         input_images=synced_images,
         prompt=prompt,
         cfg=request.cfg,
-        denoise=request.denoise,
+        denoise=request.denoise if synced_images else None,
         steps=4,
     )
 

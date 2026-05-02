@@ -600,6 +600,100 @@
     return characterState.dropSlots.find(Boolean) || null;
   }
 
+  function findRegisteredCharacterByToken(token) {
+    const normalizedToken = normalizeCharacterToken(token);
+    if (!normalizedToken) return null;
+    const characters = Array.isArray(state.characterStep.characters) ? state.characterStep.characters : [];
+    return characters.find((item) => normalizeCharacterToken(item?.token || item?.name || '') === normalizedToken) || null;
+  }
+
+  function buildRefSlotFromRegisteredCharacter(character) {
+    if (!character) return null;
+    const filename = String(character.filename || '').trim();
+    if (!filename) return null;
+    return {
+      filename,
+      originalName: String(character.name || character.token || filename).trim(),
+      previewUrl: String(character.preview_url || '').trim(),
+    };
+  }
+
+  function setCharacterRefSlotFromAsset(slotIndex, asset, options = {}) {
+    const {
+      clearCharacterImage = false,
+      clearCharacterSheet = null,
+      confirmReplace = true,
+      rerender = true,
+      save = true,
+      noticeMessage = '',
+      silent = false,
+    } = options;
+    const safeIndex = Math.max(0, Math.min(2, Number(slotIndex) || 0));
+    const filename = String(asset?.filename || '').trim();
+    if (!filename) {
+      throw new Error('画像が見つかりません');
+    }
+    const nextSlot = {
+      filename,
+      originalName: String(asset?.originalName || asset?.filename || `ref${safeIndex + 1}`).trim(),
+      previewUrl: String(asset?.previewUrl || '').trim(),
+    };
+
+    const currentSlot = state.characterStep.dropSlots[safeIndex] || null;
+    if (
+      confirmReplace
+      && currentSlot?.filename
+      && currentSlot.filename !== nextSlot.filename
+      && !window.confirm(`ref${safeIndex + 1} を「${nextSlot.originalName}」に置き換えますか？`)
+    ) {
+      return false;
+    }
+
+    state.characterStep.dropSlots[safeIndex] = nextSlot;
+    if (clearCharacterImage) {
+      state.characterStep.characterImage = null;
+    }
+    const shouldClearSheet = clearCharacterSheet == null ? safeIndex === 0 : !!clearCharacterSheet;
+    if (shouldClearSheet) {
+      state.characterStep.characterSheetImage = null;
+    }
+    state.canvas.updatedAt = Date.now();
+    if (!silent) {
+      setCharacterNotice(noticeMessage || `ref${safeIndex + 1} に ${nextSlot.originalName} を設定しました`, 'success');
+    }
+    if (rerender) renderDetail();
+    if (save) scheduleSave();
+    return true;
+  }
+
+  function setCharacterRefSlotFromRegisteredCharacter(slotIndex, tokenOrCharacter, options = {}) {
+    const {
+      clearDerived = true,
+      confirmReplace = true,
+      rerender = true,
+      save = true,
+      noticeMessage = '',
+      silent = false,
+    } = options;
+    const safeIndex = Math.max(0, Math.min(2, Number(slotIndex) || 0));
+    const character = typeof tokenOrCharacter === 'string'
+      ? findRegisteredCharacterByToken(tokenOrCharacter)
+      : tokenOrCharacter;
+    const nextSlot = buildRefSlotFromRegisteredCharacter(character);
+    if (!nextSlot) {
+      throw new Error('登録キャラクタ画像が見つかりません');
+    }
+    return setCharacterRefSlotFromAsset(safeIndex, nextSlot, {
+      clearCharacterImage: clearDerived,
+      clearCharacterSheet: clearDerived && safeIndex === 0,
+      confirmReplace,
+      rerender,
+      save,
+      noticeMessage,
+      silent,
+    });
+  }
+
   function getCharacterAnalysisTarget() {
     const characterState = getCharacterStepState();
     if (characterState.characterSheetImage?.previewUrl) {
@@ -625,6 +719,22 @@
       };
     }
     return null;
+  }
+
+  function isTextOnlyCharacterImageAsset(asset = state.characterStep.characterImage) {
+    const workflow = String(asset?.workflow || '').trim().toLowerCase();
+    return Boolean(workflow && workflow.includes('t2i'));
+  }
+
+  function getTextOnlyCharacterImageWarning(operationLabel = '次の操作') {
+    return `${operationLabel} の前に確認してください。現在の「キャラ合成画像」は「テキストから新規作成」の T2I 出力です。後続の参照用には、@登録キャラ や ref1/ref2/ref3 を使って「キャラ合成画像を作成」から正しいキャラ合成を入れることを推奨します。\n\nこのまま続行しますか？`;
+  }
+
+  function confirmTextOnlyCharacterImageUsage(operationLabel = '次の操作') {
+    if (!isTextOnlyCharacterImageAsset()) {
+      return true;
+    }
+    return window.confirm(getTextOnlyCharacterImageWarning(operationLabel));
   }
 
   function showCharacterImageReferenceDialog() {
@@ -691,14 +801,13 @@
   function renderCanvasSummary() {
     const preset = getPresetById();
     const step = getCurrentStep();
-    const mode = getModeMeta();
     const pipeline = getSelectedPipelineOption(preset);
 
     els.canvasTitle.textContent = state.canvas.name || '新しいキャンバス';
     els.canvasNameInput.value = state.canvas.name || '';
     els.canvasUpdatedAt.textContent = `最終保存: ${formatDateTime(state.lastSavedAt || state.canvas.updatedAt)}`;
     els.summaryPreset.textContent = preset?.name || '未選択';
-    els.summaryMode.textContent = pipeline?.label || mode?.label || '未選択';
+    els.summaryMode.textContent = pipeline?.label || '未選択';
     els.summaryStep.textContent = step?.title || '未選択';
     els.summaryHint.textContent = step?.handoff || 'プリセットを選択してください';
     renderSaveStatus(state.lastSavedAt ? '前回のキャンバスを保持中' : 'ローカル保持中', !!state.lastSavedAt);
@@ -756,14 +865,9 @@
                 ${selectedPipeline?.description ? `<p class="pipeline-select-description">${escapeHtml(selectedPipeline.description)}</p>` : ''}
               </div>
             ` : '<div></div>'}
-            <div class="preset-mode-inline">
-              <div class="field-label">作業</div>
-              <div class="mode-switch" id="modeSwitch">${getModeSwitchMarkup()}</div>
-            </div>
           </div>
         </div>
           <div>
-            <div class="flow-mini-badge">推奨: ${escapeHtml(getModeMeta(preset.recommended_mode)?.label || '自動制作')}</div>
             ${selectedPipeline ? `<div class="pipeline-selected-note"><span>制作実行プラン</span><strong>${escapeHtml(selectedPipeline.label || '')}</strong></div>` : ''}
         </div>
       </div>
@@ -1833,6 +1937,37 @@
     }
   }
 
+  async function runMusicStep() {
+    const musicState = getMusicStepState();
+    const actions = [];
+    const language = String(musicState.vocalLanguage || 'ja');
+    const hasTags = !!String(musicState.tagsText || '').trim();
+    const hasLyrics = !!String(musicState.lyricsText || '').trim();
+
+    if (!hasTags || (language !== 'inst' && musicState.hasVocals && !hasLyrics)) {
+      await generateMusicPlan();
+      if (String(state.musicStep.tagsText || '').trim() || String(state.musicStep.lyricsText || '').trim()) {
+        actions.push('歌詞・楽曲プラン作成');
+      }
+    }
+
+    if (!state.musicStep.generatedAudio?.filename) {
+      await produceMusicAudio();
+      if (state.musicStep.generatedAudio?.filename) {
+        actions.push('音楽制作');
+      }
+    }
+
+    if (!actions.length) {
+      setMusicNotice('実行可能な未完了処理はありませんでした', 'info');
+      renderDetail();
+      return;
+    }
+
+    setMusicNotice(`音楽STEPをまとめて実行しました（${actions.join(' → ')}）`, 'success');
+    renderDetail();
+  }
+
   function getSceneImageStepState() {
     return state.sceneImageStep;
   }
@@ -2603,6 +2738,83 @@
     }
   }
 
+  async function generatePendingSceneVideos() {
+    const items = getSceneVideoDisplayItems();
+    const targets = items.filter((item) => item?.image?.filename && String(item?.prompt || '').trim() && !item?.video?.filename);
+    if (!targets.length) {
+      return { completed: 0, skipped: items.length, cancelled: false };
+    }
+    if (sceneVideoGenerationBusy) {
+      return { completed: 0, skipped: 0, cancelled: false };
+    }
+
+    sceneVideoGenerationBusy = true;
+    sceneVideoBatchCancelRequested = false;
+    let completed = 0;
+    let skipped = 0;
+    let cancelled = false;
+    try {
+      for (let index = 0; index < items.length; index += 1) {
+        if (sceneVideoBatchCancelRequested) {
+          cancelled = true;
+          break;
+        }
+        const current = items[index];
+        if (!current?.image?.filename || !String(current?.prompt || '').trim() || current?.video?.filename) {
+          skipped += 1;
+          continue;
+        }
+        setSceneVideoNotice(`不足シーン動画を生成中... Scene ${current.sceneIndex} (${completed + 1}/${targets.length})`, 'info');
+        renderDetail();
+        try {
+          await generateSceneVideoAtIndex(index, { rerender: false, save: false });
+        } catch (error) {
+          if (sceneVideoBatchCancelRequested && isAbortLikeError(error)) {
+            cancelled = true;
+            break;
+          }
+          throw error;
+        }
+        completed += 1;
+        renderDetail();
+        focusSelectedSceneVideoPreview();
+      }
+      state.canvas.updatedAt = Date.now();
+      if (cancelled) {
+        setSceneVideoNotice(`不足シーン動画の生成を中止しました（成功 ${completed} / スキップ ${skipped}）`, 'info');
+      } else {
+        setSceneVideoNotice(`不足していたシーン動画を生成しました（成功 ${completed} / スキップ ${skipped}）`, 'success');
+      }
+      renderDetail();
+      scheduleSave();
+      return { completed, skipped, cancelled };
+    } finally {
+      sceneVideoGenerationBusy = false;
+      sceneVideoBatchCancelRequested = false;
+      renderDetail();
+    }
+  }
+
+  async function runSceneVideoStep() {
+    const items = getSceneVideoDisplayItems();
+    const hasReadySource = items.some((item) => item?.image?.filename && String(item?.prompt || '').trim());
+    if (!hasReadySource) {
+      setSceneVideoNotice('先にシーン画像STEPで画像とプロンプトを用意してください', 'warning');
+      renderDetail();
+      return;
+    }
+
+    const result = await generatePendingSceneVideos();
+    if (!result.completed) {
+      setSceneVideoNotice('実行可能な未完了処理はありませんでした', 'info');
+      renderDetail();
+      return;
+    }
+
+    setSceneVideoNotice(`シーン動画STEPをまとめて実行しました（不足シーン動画 ${result.completed}件生成）`, 'success');
+    renderDetail();
+  }
+
   function clearSelectedSceneVideo() {
     const items = getSceneVideoDisplayItems();
     const index = Math.max(0, Number(state.sceneVideoStep.selectedSceneIndex || 0) || 0);
@@ -2728,7 +2940,7 @@
     if (finalMvRenderBusy) return;
 
     finalMvRenderBusy = true;
-    setFinalMvNotice(`自動制作中です... まずシーンクリップを結合します (${sceneVideoFilenames.length}本)`, 'info');
+    setFinalMvNotice(`STEP一括実行中です... まずシーンクリップを結合します (${sceneVideoFilenames.length}本)`, 'info');
     renderDetail();
 
     try {
@@ -2776,7 +2988,7 @@
       state.finalMvStep.finalVideo = normalizeFinalMvMediaItem(renderResult?.final_video);
       state.finalMvStep.lastRenderedAt = Date.now();
       state.canvas.updatedAt = Date.now();
-      setFinalMvNotice('自動制作で完成MVを生成しました', 'success');
+      setFinalMvNotice('完成MV STEP をまとめて実行しました', 'success');
       renderDetail();
       scheduleSave();
     } finally {
@@ -2808,6 +3020,11 @@
     const prompt = String(selected?.prompt || '').trim();
     if (!prompt) {
       setSceneImageNotice('先に対象シーンのプロンプトを用意してください', 'warning');
+      renderDetail();
+      return;
+    }
+    if (!confirmTextOnlyCharacterImageUsage('シーン画像生成')) {
+      setSceneImageNotice('シーン画像生成をキャンセルしました。必要なら先に正しいキャラ合成画像を作成してください', 'info');
       renderDetail();
       return;
     }
@@ -2903,6 +3120,11 @@
       renderDetail();
       return;
     }
+    if (!confirmTextOnlyCharacterImageUsage('全シーン画像生成')) {
+      setSceneImageNotice('全シーン画像生成をキャンセルしました。必要なら先に正しいキャラ合成画像を作成してください', 'info');
+      renderDetail();
+      return;
+    }
     if (sceneImageGenerationBusy) return;
 
     sceneImageGenerationBusy = true;
@@ -2949,6 +3171,135 @@
         renderDetail();
       }
     }
+  }
+
+  async function generatePendingSceneImages() {
+    const prompts = getSceneImageDisplayPrompts();
+    const targets = prompts.filter((item) => String(item?.prompt || '').trim() && !item?.image?.filename);
+    if (!targets.length) {
+      return { completed: 0, skipped: prompts.length, cancelled: false };
+    }
+    if (sceneImageGenerationBusy) {
+      return { completed: 0, skipped: 0, cancelled: false };
+    }
+
+    sceneImageGenerationBusy = true;
+    sceneImageBatchCancelRequested = false;
+    let completed = 0;
+    let skipped = 0;
+    let cancelled = false;
+    try {
+      for (let index = 0; index < prompts.length; index += 1) {
+        if (sceneImageBatchCancelRequested) {
+          cancelled = true;
+          break;
+        }
+        const current = prompts[index];
+        if (!String(current?.prompt || '').trim() || current?.image?.filename) {
+          skipped += 1;
+          continue;
+        }
+        state.sceneImageStep.selectedSceneIndex = index;
+        setSceneImageNotice(`不足シーン画像を生成中... (${completed + 1}/${targets.length})`, 'info');
+        renderDetail();
+        focusSelectedScenePreview();
+        try {
+          await generateSceneImageAtIndex(index, { rerender: false, save: false });
+        } catch (error) {
+          if (sceneImageBatchCancelRequested && isAbortLikeError(error)) {
+            cancelled = true;
+            break;
+          }
+          throw error;
+        }
+        completed += 1;
+        renderDetail();
+        focusSelectedScenePreview();
+      }
+      state.canvas.updatedAt = Date.now();
+      if (cancelled) {
+        setSceneImageNotice(`不足シーン画像の生成を中止しました（成功 ${completed} / スキップ ${skipped}）`, 'info');
+      } else {
+        setSceneImageNotice(`不足していたシーン画像を生成しました（成功 ${completed} / スキップ ${skipped}）`, 'success');
+      }
+      renderDetail();
+      scheduleSave();
+      return { completed, skipped, cancelled };
+    } finally {
+      sceneImageGenerationBusy = false;
+      sceneImageBatchCancelRequested = false;
+      renderDetail();
+    }
+  }
+
+  async function runSceneImageStep() {
+    const actions = [];
+    const sceneState = getSceneImageStepState();
+    const storyState = getStoryStepState();
+    const musicState = getMusicStepState();
+    const promptsBefore = getSceneImageDisplayPrompts();
+    const promptCountBefore = promptsBefore.filter((item) => String(item?.prompt || '').trim()).length;
+    const imageCountBefore = promptsBefore.filter((item) => item?.image?.filename).length;
+
+    const planSourceAvailable = !!(
+      String(storyState.scenarioText || '').trim()
+      || String(musicState.lyricsText || '').trim()
+      || String(storyState.worldNotes || '').trim()
+      || String(musicState.arrangementNotes || '').trim()
+    );
+    const promptSourceAvailable = !!(
+      (sceneState.useStoryContext && (String(storyState.scenarioText || '').trim() || String(storyState.worldNotes || '').trim()))
+      || (sceneState.useMusicContext && (String(musicState.lyricsText || '').trim() || String(musicState.arrangementNotes || '').trim() || String(musicState.tagsText || '').trim()))
+      || (sceneState.useCharacterContext && String(getStoryCharacterContext() || '').trim())
+    );
+
+    if (promptCountBefore === 0) {
+      if (planSourceAvailable) {
+        await proposeScenePlan();
+        actions.push('尺・遷移提案');
+      }
+
+      if (!promptSourceAvailable) {
+        setSceneImageNotice('シーン画像STEP一括実行には、シナリオ・音楽・キャラクタ情報のいずれかを参照できる状態が必要です', 'warning');
+        renderDetail();
+        return;
+      }
+
+      await generateScenePrompts();
+      const promptCountAfterGenerate = getSceneImageDisplayPrompts().filter((item) => String(item?.prompt || '').trim()).length;
+      if (promptCountAfterGenerate > 0) {
+        actions.push(`シーンプロンプト ${promptCountAfterGenerate}件作成`);
+      }
+    }
+
+    const promptCountReady = getSceneImageDisplayPrompts().filter((item) => String(item?.prompt || '').trim()).length;
+    if (promptCountReady === 0) {
+      setSceneImageNotice('シーンプロンプトを作成できなかったため、シーン画像生成へ進めませんでした', 'warning');
+      renderDetail();
+      return;
+    }
+
+    const pendingResult = await generatePendingSceneImages();
+    if (pendingResult.completed) {
+      actions.push(`不足シーン画像 ${pendingResult.completed}件生成`);
+    }
+
+    const promptsAfter = getSceneImageDisplayPrompts();
+    const promptCountAfter = promptsAfter.filter((item) => String(item?.prompt || '').trim()).length;
+    const imageCountAfter = promptsAfter.filter((item) => item?.image?.filename).length;
+
+    if (!actions.length) {
+      if (promptCountAfter > promptCountBefore || imageCountAfter > imageCountBefore) {
+        setSceneImageNotice('シーン画像STEPをまとめて実行しました', 'success');
+      } else {
+        setSceneImageNotice('実行可能な未完了処理はありませんでした', 'info');
+      }
+      renderDetail();
+      return;
+    }
+
+    setSceneImageNotice(`シーン画像STEPをまとめて実行しました（${actions.join(' → ')}）`, 'success');
+    renderDetail();
   }
 
   function clearSelectedSceneImage() {
@@ -3014,7 +3365,7 @@
               </div>
               <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
-            <p>${escapeHtml(step.objective || '')}</p>
+            <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="story-meta-grid">
               <label class="preset-select-group">
@@ -3053,7 +3404,7 @@
             <textarea id="storyIdeaInput" data-story-field="idea" class="prompt-textarea" rows="4" placeholder="${escapeHtml(ideaPlaceholder)}">${escapeHtml(storyState.idea || '')}</textarea>
             <div class="character-ref-options">
               <button id="storyIdeaTranslateBtn" data-story-translate="idea" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
-              <button id="storyGenerateBtn" class="detail-action-btn primary" type="button" ${storyGenerationBusy ? 'disabled' : ''}>${storyGenerationBusy ? generateBusyLabel : generateLabel}</button>
+              <button id="storyGenerateBtn" class="detail-action-btn primary" type="button" ${storyGenerationBusy ? 'disabled' : ''}>${storyGenerationBusy ? '⏳ 実行中...' : '🧠 このSTEPを実行'}</button>
               <button id="storyUseCharacterContextBtn" class="detail-action-btn secondary" type="button" ${characterContext ? '' : 'disabled'}>キャラ情報を反映</button>
             </div>
           </section>
@@ -3099,10 +3450,6 @@
             </ul>
           </section>
 
-          <section class="mode-note">
-            <strong>${escapeHtml(mode?.label || '自動制作')}時の見せ方</strong>
-            <p>${escapeHtml(getModeSpecificHint(state.mode, step))}</p>
-          </section>
         </div>
       </div>
     `;
@@ -3137,7 +3484,7 @@
               </div>
               <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
-            <p>${escapeHtml(step.objective || '')}</p>
+            <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="story-meta-grid">
               <label class="preset-select-group">
@@ -3197,8 +3544,9 @@
             <p class="field-help">シナリオから受け取った感情曲線を、曲調・声質・展開・サビの見せ場に変換するためのメモです。</p>
             <textarea id="musicPromptInput" data-music-field="musicPrompt" class="prompt-textarea" rows="6" placeholder="例: Aメロは静かに、サビで解放感。雨の夜から夜明けへ抜けるようなシティポップ感。">${escapeHtml(musicState.musicPrompt || '')}</textarea>
             <div class="character-ref-options">
-              <button id="musicProduceBtn" class="detail-action-btn primary" type="button" ${musicAudioGenerationBusy ? 'disabled' : ''}>${musicAudioGenerationBusy ? '⏳ 音楽生成中...' : '🎵 音楽制作'}</button>
+              <button id="musicStepRunBtn" class="detail-action-btn primary" type="button" ${(musicPlanGenerationBusy || musicAudioGenerationBusy) ? 'disabled' : ''}>${(musicPlanGenerationBusy || musicAudioGenerationBusy) ? '⏳ 実行中...' : '🎼 このSTEPをまとめて実行'}</button>
               <button id="musicGenerateBtn" class="detail-action-btn secondary" type="button" ${musicPlanGenerationBusy ? 'disabled' : ''}>${musicPlanGenerationBusy ? '⏳ 生成中...' : '🧠 歌詞・楽曲プラン作成'}</button>
+              <button id="musicProduceBtn" class="detail-action-btn secondary" type="button" ${musicAudioGenerationBusy ? 'disabled' : ''}>${musicAudioGenerationBusy ? '⏳ 音楽生成中...' : '🎵 音楽制作'}</button>
               <button id="musicImportAudioBtn" class="detail-action-btn secondary" type="button">📥 外部音楽を読み込む</button>
               <button id="musicPromptTranslateBtn" data-music-translate="musicPrompt" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
               <button id="musicUseStoryContextBtn" class="detail-action-btn secondary" type="button" ${storyContext ? '' : 'disabled'}>シナリオ内容を反映</button>
@@ -3304,10 +3652,6 @@
             </div>
           </section>
 
-          <section class="mode-note">
-            <strong>${escapeHtml(mode?.label || '自動制作')}時の見せ方</strong>
-            <p>${escapeHtml(getModeSpecificHint(state.mode, step))}</p>
-          </section>
         </div>
       </div>
     `;
@@ -3350,7 +3694,7 @@
               </div>
               <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
-            <p>${escapeHtml(step.objective || '')}</p>
+            <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="story-meta-grid">
               <label class="preset-select-group">
@@ -3393,7 +3737,8 @@
             <p class="field-help">シナリオ・確定歌詞・キャラクタ情報から、各シーンごとの静止画向けプロンプトをまとめて作成します。</p>
             <p class="field-help">${escapeHtml(getPipelineTransitionGuidance(String(state.selectedPipelinePresetId || ''), getSelectedSceneVideoWorkflowMode()))}</p>
             <div class="character-ref-options">
-              <button id="scenePromptGenerateBtn" class="detail-action-btn primary" type="button" ${scenePromptGenerationBusy ? 'disabled' : ''}>${scenePromptGenerationBusy ? '⏳ シーンプロンプト生成中...' : '🤖 シーンプロンプト作成'}</button>
+              <button id="sceneImageStepRunBtn" class="detail-action-btn primary" type="button" ${(scenePromptGenerationBusy || scenePlanGenerationBusy || sceneImageGenerationBusy) ? 'disabled' : ''}>${(scenePromptGenerationBusy || scenePlanGenerationBusy || sceneImageGenerationBusy) ? '⏳ 実行中...' : '🖼️ このSTEPをまとめて実行'}</button>
+              <button id="scenePromptGenerateBtn" class="detail-action-btn secondary" type="button" ${scenePromptGenerationBusy ? 'disabled' : ''}>${scenePromptGenerationBusy ? '⏳ シーンプロンプト生成中...' : '🤖 シーンプロンプト作成'}</button>
               <button id="scenePlanSuggestBtn" class="detail-action-btn secondary" type="button" ${(scenePromptGenerationBusy || scenePlanGenerationBusy) ? 'disabled' : ''}>${scenePlanGenerationBusy ? '⏳ 提案中...' : '🧩 尺・遷移を自動提案'}</button>
               ${sceneState.scenePrompts.length ? '<button id="scenePromptClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
             </div>
@@ -3428,8 +3773,8 @@
             <h3>${escapeHtml(selected ? `Scene ${selected.sceneIndex} 画像` : 'シーン画像')}</h3>
             <p class="field-help">キャラ合成画像・キャラシート・参照画像があればI2I、なければT2Iで生成します。</p>
             <div class="character-ref-options">
-              <button id="sceneImageGenerateAllBtn" class="detail-action-btn secondary" type="button" ${sceneImageGenerationBusy ? 'disabled' : ''}>${sceneImageGenerationBusy ? '⏳ 画像生成中...' : '🖼️ 全シーン画像生成'}</button>
-              <button id="sceneImageGenerateBtn" class="detail-action-btn primary" type="button" ${sceneImageGenerationBusy ? 'disabled' : ''}>${sceneImageGenerationBusy ? '⏳ 画像生成中...' : '🖼️ このシーン画像を生成'}</button>
+              <button id="sceneImageGenerateAllBtn" class="detail-action-btn secondary" type="button" ${sceneImageGenerationBusy ? 'disabled' : ''}>${sceneImageGenerationBusy ? '⏳ 画像生成中...' : '🖼️ 全シーン画像を再生成'}</button>
+              <button id="sceneImageGenerateBtn" class="detail-action-btn secondary" type="button" ${sceneImageGenerationBusy ? 'disabled' : ''}>${sceneImageGenerationBusy ? '⏳ 画像生成中...' : '🖼️ このシーン画像を生成'}</button>
               ${sceneImageGenerationBusy ? '<button id="sceneImageCancelBtn" class="detail-action-btn secondary" type="button">⏹️ 中止</button>' : ''}
               ${selected?.image?.previewUrl ? '<button id="sceneImageClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
             </div>
@@ -3452,10 +3797,6 @@
             </ul>
           </section>
 
-          <section class="mode-note">
-            <strong>${escapeHtml(mode?.label || '自動制作')}時の見せ方</strong>
-            <p>${escapeHtml(getModeSpecificHint(state.mode, step))}</p>
-          </section>
         </div>
       </div>
     `;
@@ -3497,7 +3838,7 @@
               </div>
               <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
-            <p>${escapeHtml(step.objective || '')}</p>
+            <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="story-meta-grid">
               <label class="preset-select-group">
@@ -3583,8 +3924,9 @@
             <h3>${escapeHtml(selected ? `Scene ${selected.sceneIndex} プレビュー` : '動画プレビュー')}</h3>
             <p class="field-help">FLF / LTX FLF を選ぶと、次シーン画像がある場合は開始フレーム / 終了フレームとして補間します。なければ I2V 系に自動で戻ります。</p>
             <div class="character-ref-options">
-              <button id="sceneVideoGenerateAllBtn" class="detail-action-btn secondary" type="button" ${sceneVideoGenerationBusy ? 'disabled' : ''}>${sceneVideoGenerationBusy ? '⏳ 動画生成中...' : '🎬 全てのシーン動画を生成'}</button>
-              <button id="sceneVideoGenerateBtn" class="detail-action-btn primary" type="button" ${sceneVideoGenerationBusy ? 'disabled' : ''}>${sceneVideoGenerationBusy ? '⏳ 動画生成中...' : '🎬 このシーン動画を生成'}</button>
+              <button id="sceneVideoStepRunBtn" class="detail-action-btn primary" type="button" ${sceneVideoGenerationBusy ? 'disabled' : ''}>${sceneVideoGenerationBusy ? '⏳ 実行中...' : '🎬 このSTEPをまとめて実行'}</button>
+              <button id="sceneVideoGenerateAllBtn" class="detail-action-btn secondary" type="button" ${sceneVideoGenerationBusy ? 'disabled' : ''}>${sceneVideoGenerationBusy ? '⏳ 動画生成中...' : '🎬 全シーン動画を再生成'}</button>
+              <button id="sceneVideoGenerateBtn" class="detail-action-btn secondary" type="button" ${sceneVideoGenerationBusy ? 'disabled' : ''}>${sceneVideoGenerationBusy ? '⏳ 動画生成中...' : '🎬 このシーン動画を生成'}</button>
               ${sceneVideoGenerationBusy ? '<button id="sceneVideoCancelBtn" class="detail-action-btn secondary" type="button">⏹️ 中止</button>' : ''}
               ${selected?.video?.previewUrl ? '<button id="sceneVideoClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
             </div>
@@ -3617,10 +3959,6 @@
             </ul>
           </section>
 
-          <section class="mode-note">
-            <strong>${escapeHtml(mode?.label || '自動制作')}時の見せ方</strong>
-            <p>${escapeHtml(getModeSpecificHint(state.mode, step))}</p>
-          </section>
         </div>
       </div>
     `;
@@ -3647,7 +3985,7 @@
               </div>
               <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
-            <p>${escapeHtml(step.objective || '')}</p>
+            <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="story-meta-grid">
               <label class="preset-select-group">
@@ -3676,7 +4014,7 @@
             <p class="field-help">まずシーン動画を結合し、必要なら生成済み音声を合成して完成MVを出力します。</p>
             <div class="final-mv-action-stack">
               <div class="final-mv-action-row final-mv-action-row-single">
-                <button id="finalMvAutoBtn" class="detail-action-btn primary" type="button" ${finalMvRenderBusy ? 'disabled' : ''}>${finalMvRenderBusy ? '⏳ 自動制作中...' : '✨ 自動制作（結合→完成MV）'}</button>
+                <button id="finalMvAutoBtn" class="detail-action-btn primary" type="button" ${finalMvRenderBusy ? 'disabled' : ''}>${finalMvRenderBusy ? '⏳ 実行中...' : '✨ このSTEPをまとめて実行'}</button>
               </div>
               <div class="final-mv-action-row final-mv-action-row-pair">
                 <button id="finalMvConcatBtn" class="detail-action-btn secondary" type="button" ${finalMvRenderBusy ? 'disabled' : ''}>${finalMvRenderBusy ? '⏳ 処理中...' : '🎞️ シーンクリップを結合'}</button>
@@ -3728,10 +4066,6 @@
             </ul>
           </section>
 
-          <section class="mode-note">
-            <strong>${escapeHtml(mode?.label || '自動制作')}時の見せ方</strong>
-            <p>${escapeHtml(getModeSpecificHint(state.mode, step))}</p>
-          </section>
         </div>
       </div>
     `;
@@ -3769,7 +4103,10 @@
           <button class="character-registry-select character-registry-preview" type="button" data-character-token="${escapeHtml(item.token || '')}">
             ${item.preview_url ? `<img src="${escapeHtml(item.preview_url)}" alt="${escapeHtml(name)}" />` : '<div class="character-slot-placeholder">画像なし</div>'}
           </button>
-          <button class="detail-action-btn secondary compact character-delete-btn" type="button" data-character-delete="${escapeHtml(name)}" aria-label="${escapeHtml(name)} を削除">削除</button>
+          <div class="character-registry-actions">
+            <button class="detail-action-btn secondary compact" type="button" data-character-ref-slot="0" data-character-token-ref="${escapeHtml(item.token || '')}">ref1に設定</button>
+            <button class="detail-action-btn secondary compact character-delete-btn" type="button" data-character-delete="${escapeHtml(name)}" aria-label="${escapeHtml(name)} を削除">削除</button>
+          </div>
           <button class="character-registry-select character-registry-meta" type="button" data-character-token="${escapeHtml(item.token || '')}">
             <strong>${escapeHtml(name)}</strong>
             <span>${escapeHtml(item.token || '')}</span>
@@ -3789,7 +4126,7 @@
               </div>
               <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
-            <p>${escapeHtml(step.objective || '')}</p>
+            <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="character-ref-grid">${slotsMarkup}</div>
             <div class="character-ref-options">
@@ -3809,8 +4146,10 @@
             <h3>キャラ合成プロンプト</h3>
             <textarea id="characterPromptInput" class="prompt-textarea" rows="3" placeholder="例: @character_name, same outfit, front view, ref1 を基準に自然光で...">${escapeHtml(characterState.imagePrompt || '')}</textarea>
             <div class="character-ref-options">
+              <button id="characterStepRunBtn" class="detail-action-btn primary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>${characterImageGenerationBusy ? '⏳ 実行中...' : '👤 このSTEPをまとめて実行'}</button>
               <button id="characterPromptTranslateBtn" class="detail-action-btn secondary compact" type="button" title="プロンプトを翻訳（英⇔日）">🌐 翻訳</button>
-              <button id="characterImageGenerateBtn" class="detail-action-btn primary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>${characterImageGenerationBusy ? '⏳ 生成中...' : 'キャラ合成画像を作成'}</button>
+              <button id="characterImageGenerateBtn" class="detail-action-btn secondary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>${characterImageGenerationBusy ? '⏳ 生成中...' : 'キャラ合成画像を作成'}</button>
+              <button id="characterImageTextGenerateBtn" class="detail-action-btn secondary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>${characterImageGenerationBusy ? '⏳ 生成中...' : 'テキストから新規作成'}</button>
               ${characterState.characterImage ? `<button id="characterImageClearBtn" class="detail-action-btn secondary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>クリア</button>` : ''}
             </div>
           </section>
@@ -3857,7 +4196,13 @@
                 <button class="character-output-preview-btn" type="button" data-preview-image="${escapeHtml(characterState.characterImage.previewUrl)}" data-preview-title="${escapeHtml(characterState.characterImage.filename || 'キャラ合成画像')}" aria-label="キャラ合成画像を拡大表示">
                   <img src="${escapeHtml(characterState.characterImage.previewUrl)}" alt="character composite" />
                 </button>
+                ${isTextOnlyCharacterImageAsset(characterState.characterImage) ? '<div class="character-inline-notice warning">この画像は「テキストから新規作成」の T2I 出力です。後続参照に使う前に、@登録キャラ や ref1/ref2/ref3 を使って「キャラ合成画像を作成」で正しいキャラ合成へ更新することを推奨します。</div>' : ''}
                 <div class="character-output-meta">${escapeHtml(characterState.characterImage.filename || 'キャラ合成画像')}</div>
+                <div class="character-ref-options">
+                  <button class="detail-action-btn secondary compact" type="button" data-character-image-ref-slot="0">ref1に使う</button>
+                  <button class="detail-action-btn secondary compact" type="button" data-character-image-ref-slot="1">ref2に使う</button>
+                  <button class="detail-action-btn secondary compact" type="button" data-character-image-ref-slot="2">ref3に使う</button>
+                </div>
                 <div class="character-ref-options">
                   <button id="characterImageFitVideoBtn" class="detail-action-btn secondary compact" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>動画比率に整える</button>
                   <span class="field-help">1280×720 に上下を切らず、ぼかし余白で調整します。</span>
@@ -3886,10 +4231,6 @@
             </ul>
           </section>
 
-          <section class="mode-note">
-            <strong>${escapeHtml(mode?.label || '自動制作')}時の見せ方</strong>
-            <p>${escapeHtml(getModeSpecificHint(state.mode, step))}</p>
-          </section>
         </div>
       </div>
     `;
@@ -3898,16 +4239,12 @@
   function renderDetail() {
     const preset = getPresetById();
     const step = getCurrentStep();
-    const mode = getModeMeta();
 
     if (!preset || !step) {
       els.detailTitle.textContent = 'STEPを選択してください';
       els.detailSubtitle.textContent = '上部フローからクリックすると、サブフローや設定を表示します。';
       els.detailSubtitle.hidden = false;
       renderDetailStepSummary(null);
-      if (els.detailModeBadge) {
-        els.detailModeBadge.textContent = '未選択';
-      }
       els.detailBody.innerHTML = `
         <div class="empty-state">
           <div class="empty-icon">🎬</div>
@@ -3922,39 +4259,36 @@
     els.detailSubtitle.textContent = '';
     els.detailSubtitle.hidden = true;
     renderDetailStepSummary(step);
-    if (els.detailModeBadge) {
-      els.detailModeBadge.textContent = mode?.label || '未選択';
-    }
 
     if (String(step.id) === 'character') {
-      els.detailBody.innerHTML = renderCharacterWorkspace(step, mode);
+      els.detailBody.innerHTML = renderCharacterWorkspace(step, null);
       return;
     }
 
     if (String(step.id) === 'story') {
-      els.detailBody.innerHTML = renderStoryWorkspace(step, mode);
+      els.detailBody.innerHTML = renderStoryWorkspace(step, null);
       return;
     }
 
     if (String(step.id) === 'music') {
-      els.detailBody.innerHTML = renderMusicWorkspace(step, mode);
+      els.detailBody.innerHTML = renderMusicWorkspace(step, null);
       bindMusicAudioWaveformEvents();
       ensureMusicWaveformPreview();
       return;
     }
 
     if (String(step.id) === 'scene_image') {
-      els.detailBody.innerHTML = renderSceneImageWorkspace(step, mode);
+      els.detailBody.innerHTML = renderSceneImageWorkspace(step, null);
       return;
     }
 
     if (String(step.id) === 'scene_video') {
-      els.detailBody.innerHTML = renderSceneVideoWorkspace(step, mode);
+      els.detailBody.innerHTML = renderSceneVideoWorkspace(step, null);
       return;
     }
 
     if (String(step.id) === 'final_mv') {
-      els.detailBody.innerHTML = renderFinalMvWorkspace(step, mode);
+      els.detailBody.innerHTML = renderFinalMvWorkspace(step, null);
       syncFinalMvActionButtonWidths();
       return;
     }
@@ -3981,7 +4315,7 @@
               </div>
               <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
-            <p>${escapeHtml(step.objective || '')}</p>
+            <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             <ul class="detail-list">
               ${summaryPoints}
             </ul>
@@ -3993,15 +4327,6 @@
             <div class="subflow-grid">${subflows}</div>
           </section>
 
-          <section class="mode-note">
-            <strong>${escapeHtml(mode?.label || '自動制作')}時の見せ方</strong>
-            <p>${escapeHtml(getModeSpecificHint(state.mode, step))}</p>
-            <div class="detail-actions">
-              <button class="detail-action-btn primary" type="button">このSTEPから開始</button>
-              <button class="detail-action-btn secondary" type="button">前後STEPの依存関係を確認</button>
-              <button class="detail-action-btn secondary" type="button">完成MVまでの到達イメージを見る</button>
-            </div>
-          </section>
         </div>
 
         <div class="detail-grid">
@@ -4201,6 +4526,11 @@
       renderDetail();
       return;
     }
+    if (analysisTarget.source === 'characterImage' && !confirmTextOnlyCharacterImageUsage('画像解析')) {
+      setCharacterNotice('画像解析をキャンセルしました。必要なら先に正しいキャラ合成画像を作成してください', 'info');
+      renderDetail();
+      return;
+    }
 
     debugLog('vlm-analyze request', {
       sessionId: getSessionId(),
@@ -4265,6 +4595,7 @@
     const tokenMatches = [...prompt.matchAll(/[@＠]([^\s@＠,.<>「」"“”]+)/g)];
     const pictureMappings = [];
     const inputImages = [];
+    const usedCharacters = [];
     const seenFiles = new Set();
     let nextPictureNum = 1;
 
@@ -4284,6 +4615,7 @@
       });
       const filename = String(character?.filename || '').trim();
       if (!filename || seenFiles.has(filename)) return;
+      usedCharacters.push(character);
       seenFiles.add(filename);
       pictureMappings.push({ pattern: new RegExp(escapeRegExp(original), 'g'), replacement: `Picture ${nextPictureNum}` });
       inputImages.push(filename);
@@ -4308,6 +4640,7 @@
     return {
       expandedPrompt,
       inputImages: inputImages.slice(0, 3),
+      usedCharacters,
     };
   }
 
@@ -4383,7 +4716,7 @@
       }
     }
 
-    const { expandedPrompt, inputImages } = expandCharacterPromptForPreview(rawPrompt, { seedImageFilename });
+    const { expandedPrompt, inputImages, usedCharacters } = expandCharacterPromptForPreview(rawPrompt, { seedImageFilename });
     if (!inputImages.length) {
       setCharacterNotice('ref1/ref2/ref3 または @キャラ名 を含めてください', 'warning');
       renderDetail();
@@ -4447,8 +4780,90 @@
         workflow: payload.workflow || '',
         promptId: payload.prompt_id || '',
       };
-      setCharacterNotice('キャラ合成画像を生成しました', 'success');
+      let autoAssignedName = '';
+      if (!state.characterStep.dropSlots[0]?.filename) {
+        const autoCharacter = usedCharacters[0] || findRegisteredCharacterByToken(characterState.selectedCharacterToken);
+        if (autoCharacter) {
+          const assigned = setCharacterRefSlotFromRegisteredCharacter(0, autoCharacter, {
+            clearDerived: false,
+            confirmReplace: false,
+            rerender: false,
+            save: false,
+            silent: true,
+          });
+          if (assigned) {
+            autoAssignedName = String(autoCharacter.name || autoCharacter.token || '').trim();
+          }
+        }
+      }
+      setCharacterNotice(autoAssignedName ? `キャラ合成画像を生成しました。${autoAssignedName} を ref1 に反映しました` : 'キャラ合成画像を生成しました', 'success');
       state.canvas.updatedAt = Date.now();
+      renderDetail();
+      scheduleSave();
+    } finally {
+      characterImageGenerationBusy = false;
+      renderDetail();
+    }
+  }
+
+  async function generateCharacterImageFromText() {
+    if (characterImageGenerationBusy) {
+      return;
+    }
+
+    const characterState = getCharacterStepState();
+    const rawPrompt = String(characterState.imagePrompt || '').trim();
+    if (!rawPrompt) {
+      setCharacterNotice('新規作成用のキャラプロンプトを入力してください', 'warning');
+      renderDetail();
+      return;
+    }
+
+    debugLog('character-image text request', {
+      sessionId: getSessionId(),
+      rawPrompt,
+    });
+
+    setCharacterNotice('テキストからキャラ画像を生成中です...', 'info');
+    characterImageGenerationBusy = true;
+    renderDetail();
+
+    try {
+      const response = await fetch('/api/v1/production/character-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_session_id: getSessionId(),
+          prompt: rawPrompt,
+          input_images: [],
+          cfg: 1.0,
+          denoise: 1.0,
+        }),
+      });
+
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_error) {
+        payload = null;
+      }
+      if (!response.ok) {
+        debugLog('character-image text error response', { status: response.status, payload });
+        throw new Error(payload?.detail || `HTTP ${response.status}`);
+      }
+
+      debugLog('character-image text response', payload);
+
+      state.characterStep.characterImage = {
+        filename: payload.filename || 'character-image.png',
+        previewUrl: payload.preview_url || '',
+        subfolder: payload.subfolder || '',
+        type: payload.type || 'output',
+        workflow: payload.workflow || '',
+        promptId: payload.prompt_id || '',
+      };
+      state.canvas.updatedAt = Date.now();
+      setCharacterNotice('テキストから新規キャラ画像を生成しました', 'success');
       renderDetail();
       scheduleSave();
     } finally {
@@ -4572,6 +4987,45 @@
     scheduleSave();
   }
 
+  async function runCharacterStep() {
+    const characterState = getCharacterStepState();
+    const actions = [];
+    const rawPrompt = String(characterState.imagePrompt || '').trim();
+
+    if (!characterState.characterImage?.filename && rawPrompt) {
+      const { inputImages } = expandCharacterPromptForPreview(rawPrompt, {});
+      if (inputImages.length) {
+        await generateCharacterImage();
+      } else {
+        await generateCharacterImageFromText();
+      }
+      if (state.characterStep.characterImage?.filename) {
+        actions.push('キャラ合成画像生成');
+      }
+    }
+
+    const primaryRef = getPrimaryCharacterReference();
+    if (!state.characterStep.characterSheetImage?.filename && primaryRef?.filename) {
+      await generateCharacterSheet();
+      if (state.characterStep.characterSheetImage?.filename) {
+        actions.push('キャラシート生成');
+      }
+    }
+
+    if (!actions.length) {
+      if (!rawPrompt && !primaryRef?.filename && !state.characterStep.characterImage?.filename && !state.characterStep.characterSheetImage?.filename) {
+        setCharacterNotice('先にキャラ合成プロンプトか参照画像を用意してください', 'warning');
+      } else {
+        setCharacterNotice('実行可能な未完了処理はありませんでした', 'info');
+      }
+      renderDetail();
+      return;
+    }
+
+    setCharacterNotice(`キャラクタSTEPをまとめて実行しました（${actions.join(' → ')}）`, 'success');
+    renderDetail();
+  }
+
   function openImagePreview(src, title) {
     if (!els.imagePreviewModal || !els.imagePreviewModalImage || !src) return;
     els.imagePreviewModalImage.src = src;
@@ -4656,6 +5110,19 @@
           await deleteRegisteredCharacter(name);
         } catch (error) {
           setCharacterNotice(error.message || 'キャラクタ削除に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      const characterRefButton = event.target.closest('[data-character-ref-slot]');
+      if (characterRefButton) {
+        const index = Number(characterRefButton.getAttribute('data-character-ref-slot'));
+        const token = String(characterRefButton.getAttribute('data-character-token-ref') || '');
+        try {
+          setCharacterRefSlotFromRegisteredCharacter(index, token, { clearDerived: true, confirmReplace: true });
+        } catch (error) {
+          setCharacterNotice(error.message || 'ref1 への設定に失敗しました', 'warning');
           renderDetail();
         }
         return;
@@ -4799,6 +5266,16 @@
         return;
       }
 
+      if (event.target.closest('#musicStepRunBtn')) {
+        try {
+          await runMusicStep();
+        } catch (error) {
+          setMusicNotice(error.message || '音楽STEPの一括実行に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
       if (event.target.closest('#musicProduceBtn')) {
         try {
           await produceMusicAudio();
@@ -4915,6 +5392,16 @@
         return;
       }
 
+      if (event.target.closest('#sceneImageStepRunBtn')) {
+        try {
+          await runSceneImageStep();
+        } catch (error) {
+          setSceneImageNotice(error.message || 'シーン画像STEPの一括実行に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
       if (event.target.closest('#scenePlanSuggestBtn')) {
         try {
           await proposeScenePlan();
@@ -4990,6 +5477,16 @@
         return;
       }
 
+      if (event.target.closest('#sceneVideoStepRunBtn')) {
+        try {
+          await runSceneVideoStep();
+        } catch (error) {
+          setSceneVideoNotice(error.message || 'シーン動画STEPの一括実行に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
       if (event.target.closest('#sceneVideoGenerateAllBtn')) {
         try {
           await generateAllSceneVideos();
@@ -5024,7 +5521,7 @@
         try {
           await autoCreateFinalMv();
         } catch (error) {
-          setFinalMvNotice(error.message || '自動制作に失敗しました', 'warning');
+          setFinalMvNotice(error.message || '完成MV STEP の一括実行に失敗しました', 'warning');
           renderDetail();
         }
         return;
@@ -5055,6 +5552,26 @@
         return;
       }
 
+      if (event.target.closest('#characterStepRunBtn')) {
+        try {
+          await runCharacterStep();
+        } catch (error) {
+          setCharacterNotice(error.message || 'キャラクタSTEPの一括実行に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('#characterImageTextGenerateBtn')) {
+        try {
+          await generateCharacterImageFromText();
+        } catch (error) {
+          setCharacterNotice(error.message || 'テキストからのキャラ画像生成に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
       if (event.target.closest('#characterImageClearBtn')) {
         state.characterStep.characterImage = null;
         setCharacterNotice('キャラ合成画像をクリアしました', 'info');
@@ -5068,6 +5585,33 @@
           await fitCharacterImageForVideo();
         } catch (error) {
           setCharacterNotice(error.message || '動画比率への調整に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      const characterImageRefButton = event.target.closest('[data-character-image-ref-slot]');
+      if (characterImageRefButton) {
+        const index = Number(characterImageRefButton.getAttribute('data-character-image-ref-slot'));
+        const currentImage = state.characterStep.characterImage;
+        if (!currentImage?.filename) {
+          setCharacterNotice('先にキャラ合成画像を生成してください', 'warning');
+          renderDetail();
+          return;
+        }
+        try {
+          setCharacterRefSlotFromAsset(index, {
+            filename: currentImage.filename,
+            originalName: currentImage.filename || 'キャラ合成画像',
+            previewUrl: currentImage.previewUrl || '',
+          }, {
+            clearCharacterImage: false,
+            clearCharacterSheet: index === 0,
+            confirmReplace: true,
+            noticeMessage: `キャラ合成画像を ref${index + 1} に設定しました`,
+          });
+        } catch (error) {
+          setCharacterNotice(error.message || 'キャラ合成画像のref設定に失敗しました', 'warning');
           renderDetail();
         }
         return;

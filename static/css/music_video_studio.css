@@ -202,6 +202,11 @@ select {
   margin: 0;
 }
 
+.detail-highlight h3,
+.detail-highlight p {
+  margin: 0;
+}
+
 .panel-preset .panel-header h2,
 .panel-canvas .panel-header .panel-kicker,
 .panel-detail .panel-header .panel-kicker {
@@ -356,7 +361,7 @@ select {
 .preset-overview,
 .detail-highlight {
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
 .panel-canvas .panel-header,
@@ -384,7 +389,7 @@ select {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
 }
 
 .canvas-meta {
@@ -720,6 +725,9 @@ select {
   color: var(--muted);
   margin: 0;
 }
+.detail-objective {
+  line-height: 1.6;
+}
 
 .pipeline-selected-note {
   display: grid;
@@ -875,6 +883,7 @@ select {
   display: grid;
   grid-template-columns: 1.35fr 1fr;
   gap: 20px;
+  align-items: start;
 }
 
 .character-step-layout {
@@ -1263,6 +1272,11 @@ select {
   gap: 4px;
 }
 
+.character-registry-actions {
+  display: grid;
+  gap: 8px;
+}
+
 .character-delete-btn {
   width: 100%;
   margin-top: 0;
@@ -1430,6 +1444,7 @@ select {
 .detail-grid {
   display: grid;
   gap: 20px;
+  align-content: start;
 }
 
 .subflow-grid {
