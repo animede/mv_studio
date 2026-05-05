@@ -9,6 +9,8 @@ Language: [日本語](./README.md) | English
 The default UI is now **Music Video Studio Production**.  
 The older `Generative Media Place` / `Simple Video` UI is kept for compatibility.
 
+If you resume development later, check [docs/HANDOFF_2026-05-03_JP.md](docs/HANDOFF_2026-05-03_JP.md) first.
+
 ---
 
 ## Overview
@@ -64,6 +66,10 @@ You select a production type and execution plan, then move through the STEP work
   - Clip concatenation
   - Audio merge
   - One-click final MV creation from concat to audio merge
+  - Dedicated `MV Library` page for browsing generated MVs
+  - Upload past MV files from the UI
+  - Import MV files from an arbitrary server-side folder
+  - Manage title and notes for each MV
 - **State persistence**
   - Browser localStorage and server-side session state
 
@@ -89,8 +95,11 @@ mv_studio/
 ├── start_production.sh               # Production startup script
 ├── static/
 │   ├── music_video_studio.html       # Production UI
+│   ├── mv_library.html               # Dedicated generated MV library page
 │   ├── js/music_video_studio.js      # Production frontend logic
+│   ├── js/mv_library.js              # MV Library frontend logic
 │   └── css/music_video_studio.css    # Production stylesheet
+├── lt/                               # Presentation assets and diagrams, ignored by git
 ├── workflows/                        # ComfyUI API workflow JSON files
 ├── docs/                             # Guides and design notes
 ├── data/                             # State / reference images / sessions, ignored by git
@@ -107,6 +116,11 @@ start.sh
 static/index.html
 static/js/simple_video.js
 ```
+
+Presentation assets:
+
+- See [lt/README.md](lt/README.md) for the presentation deck, diagram sets, and Mermaid sources
+- `lt/` is excluded as a whole in `.gitignore` for local presentation work
 
 ---
 
@@ -210,6 +224,23 @@ Main environment variables:
    - Generate scene videos
    - Concatenate clips and merge audio into the final MV
 
+### MV Library / past MV management
+
+From the Final MV STEP, you can open the dedicated `MV Library` page.
+
+Available actions:
+
+- Browse recent MV files stored in `output/movie`
+- Upload past MV files from the browser UI
+- Import MV files from an arbitrary server-side folder
+- Save a title and note for each MV
+
+Main page files:
+
+- `GET /mv_library.html`
+- [static/mv_library.html](static/mv_library.html)
+- [static/js/mv_library.js](static/js/mv_library.js)
+
 ---
 
 ## Production API
@@ -220,6 +251,7 @@ Main APIs served by `app_production.py`:
 |---|---|
 | `GET /` | Production UI |
 | `GET /music_video_studio.html` | Production UI |
+| `GET /mv_library.html` | Dedicated generated MV library page |
 | `GET /api/v1/production/config` | Presets and mode config |
 | `GET /api/v1/production/state` | Load state |
 | `POST /api/v1/production/state` | Save state |
@@ -229,6 +261,10 @@ Main APIs served by `app_production.py`:
 | `POST /api/v1/production/scene-image/generate` | Generate scene image |
 | `POST /api/v1/production/scene-video/generate` | Generate scene video |
 | `POST /api/v1/production/final-mv/render` | Concatenate clips / merge audio |
+| `GET /api/v1/production/final-mv/list` | Load MV Library items |
+| `POST /api/v1/production/final-mv/library/upload` | Upload an MV file from the UI |
+| `POST /api/v1/production/final-mv/library/import-folder` | Import MV files from a server-side folder |
+| `POST /api/v1/production/final-mv/library/metadata` | Save title / note metadata |
 | `POST /api/v1/production/character-image` | Generate character image |
 | `POST /api/v1/production/character-image/fit-video` | Fit image to video aspect ratio |
 | `POST /api/v1/production/character-sheet` | Generate character sheet |
@@ -267,6 +303,7 @@ Model names, custom nodes, and VRAM requirements depend on your ComfyUI environm
 | `data/production_state.json` | Shared server-side state |
 | `data/production_sessions/` | Per-session state |
 | `data/ref_images/` | Reference images |
+| `data/mv_library.json` | MV Library metadata such as titles, notes, and import source |
 
 `data/`, `input/`, `output/`, `temp/`, and `llm/` are ignored by git.
 

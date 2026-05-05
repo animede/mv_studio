@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MV Library</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="css/music_video_studio.css?v=20260505mvlibrarydelete" />
+</head>
+<body>
+  <div class="studio-shell mv-library-shell">
+    <header class="studio-header mv-library-header">
+      <div>
+        <p class="panel-kicker">MV Library</p>
+        <h1>生成済みMV一覧</h1>
+        <p class="studio-subtitle">過去に作成したMVのアップロード登録、任意フォルダからのインポート、タイトル / メモ管理を専用画面で行います。</p>
+      </div>
+      <div class="mv-library-header-actions">
+        <a class="detail-action-btn secondary" href="/music_video_studio.html">← Music Video Studio に戻る</a>
+        <span class="status-pill" id="mvLibraryStatus">読み込み中</span>
+      </div>
+    </header>
+
+    <main class="mv-library-main">
+      <section class="panel mv-library-summary-panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">ライブラリ概要</p>
+            <h2>MV管理サマリー</h2>
+          </div>
+        </div>
+        <div class="mv-library-summary-grid" id="mvLibrarySummary"></div>
+      </section>
+
+      <section class="panel mv-library-actions-panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">管理アクション</p>
+            <h2>登録 / インポート</h2>
+          </div>
+        </div>
+        <div class="mv-library-action-content" id="mvLibraryActionContent"></div>
+      </section>
+
+      <section class="panel mv-library-list-panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">ライブラリ一覧</p>
+            <h2>生成済みMV</h2>
+          </div>
+        </div>
+        <div class="mv-library-list-content" id="mvLibraryListContent"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="js/mv_library.js?v=20260505mvlibrarydelete"></script>
+</body>
+</html>
