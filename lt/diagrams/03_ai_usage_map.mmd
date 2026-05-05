@@ -1,0 +1,39 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#E8F0FF","primaryBorderColor":"#4C6FFF","primaryTextColor":"#1F2A44","secondaryColor":"#EEF9F1","secondaryBorderColor":"#2E9B62","tertiaryColor":"#FFF3E8","tertiaryBorderColor":"#D97706","lineColor":"#5B6475","fontFamily":"Inter, BIZ UDPGothic, sans-serif","fontSize":"16px","clusterBkg":"#F7F9FC","clusterBorder":"#C7D2E3"},"flowchart":{"nodeSpacing":28,"rankSpacing":42,"curve":"basis","htmlLabels":false}} }%%
+flowchart TD
+	subgraph FLOW[ユーザー編集フロー]
+		IDEA[意図 / 世界観]
+		MUSIC[音楽STEP]
+		SCENEIMG[画像STEP]
+		SCENEVID[動画STEP]
+		FINAL[完成MV]
+		IDEA --> MUSIC --> SCENEIMG --> SCENEVID --> FINAL
+	end
+
+	subgraph PLAN[計画・補助AI]
+		L1[LLM\nシナリオ]
+		L2[LLM\n歌詞 / タグ]
+		L3[LLM\n尺 / 遷移]
+		L4[LLM\n画像プロンプト]
+		L5[LLM\n翻訳 / 補助]
+	end
+
+	subgraph MEDIAAI[メディア生成AI]
+		M1[画像生成\nT2I / I2I]
+		M2[動画生成\nI2V / FLF / LTX]
+		M3[音楽生成\nACE-Step]
+	end
+
+	IDEA --> L1
+	IDEA --> L2
+	IDEA --> L5
+	MUSIC --> L3 --> SCENEIMG
+	MUSIC --> L4 --> SCENEIMG
+	SCENEIMG --> M1 --> SCENEVID
+	MUSIC --> M3 --> FINAL
+	SCENEVID --> M2 --> FINAL
+	classDef core fill:#E8F0FF,stroke:#4C6FFF,color:#1F2A44,stroke-width:1.4px;
+	classDef ai fill:#EEF9F1,stroke:#2E9B62,color:#163828,stroke-width:1.4px;
+	classDef media fill:#FFF3E8,stroke:#D97706,color:#4A2A00,stroke-width:1.4px;
+	class IDEA,MUSIC,SCENEIMG,SCENEVID,FINAL core;
+	class L1,L2,L3,L4,L5 ai;
+	class M1,M2,M3 media;

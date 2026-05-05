@@ -1,0 +1,20 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#E8F0FF","primaryBorderColor":"#4C6FFF","primaryTextColor":"#1F2A44","secondaryColor":"#EEF9F1","secondaryBorderColor":"#2E9B62","tertiaryColor":"#FFF3E8","tertiaryBorderColor":"#D97706","lineColor":"#5B6475","fontFamily":"Inter, BIZ UDPGothic, sans-serif","fontSize":"16px","clusterBkg":"#F7F9FC","clusterBorder":"#C7D2E3"},"flowchart":{"nodeSpacing":28,"rankSpacing":42,"curve":"basis","htmlLabels":false}} }%%
+flowchart TD
+	U[ユーザー] --> GUI[MV Studio UI]
+	GUI --> API[FastAPI制御層\napp_production.py]
+	API --> STATE[制作状態\nsession]
+	API --> LEGACY[既存資産\nsimple_video系]
+	API --> AI[AI / 生成基盤]
+
+	AI --> LLM[LLM\n計画 / 補助]
+	AI --> IMG[画像生成\nT2I / I2I]
+	AI --> VID[動画生成\nI2V / FLF / LTX]
+	AI --> MUS[音楽生成\nACE-Step]
+
+	API --> MEDIA[成果物\nimage / video / audio / movie]
+	classDef core fill:#E8F0FF,stroke:#4C6FFF,color:#1F2A44,stroke-width:1.4px;
+	classDef ai fill:#EEF9F1,stroke:#2E9B62,color:#163828,stroke-width:1.4px;
+	classDef media fill:#FFF3E8,stroke:#D97706,color:#4A2A00,stroke-width:1.4px;
+	class U,GUI,API,STATE,LEGACY,MEDIA core;
+	class AI,LLM ai;
+	class IMG,VID,MUS media;

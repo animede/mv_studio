@@ -1,0 +1,10 @@
+%%{init: {"theme":"base","themeVariables":{"background":"#FFFFFF","primaryColor":"#EAF1FF","primaryBorderColor":"#4C6FFF","primaryTextColor":"#1F2A44","secondaryColor":"#EDF9F1","secondaryBorderColor":"#2E9B62","tertiaryColor":"#FFF4E8","tertiaryBorderColor":"#D97706","lineColor":"#5B6475","fontFamily":"Inter, BIZ UDPGothic, sans-serif","fontSize":"16px","clusterBkg":"#FFFFFF","clusterBorder":"#D7DEEA"},"flowchart":{"nodeSpacing":38,"rankSpacing":48,"curve":"linear","htmlLabels":false}} }%%
+flowchart LR
+    Now[現在\nSTEP中心UI] --> Next1[タイムラインUI]
+    Now --> Next2[音源解析で\n尺最適化]
+    Now --> Next3[シーン単位\nスタイル制御]
+    Now --> Next4[再同期 / 再編集\nの可視化]
+    classDef core fill:#EAF1FF,stroke:#4C6FFF,color:#1F2A44,stroke-width:1.4px;
+    classDef assist fill:#EDF9F1,stroke:#2E9B62,color:#163828,stroke-width:1.4px;
+    class Now core;
+    class Next1,Next2,Next3,Next4 assist;

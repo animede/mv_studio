@@ -1,0 +1,25 @@
+%%{init: {"theme":"base","themeVariables":{"background":"#FFFFFF","primaryColor":"#EAF1FF","primaryBorderColor":"#4C6FFF","primaryTextColor":"#1F2A44","secondaryColor":"#EDF9F1","secondaryBorderColor":"#2E9B62","tertiaryColor":"#FFF4E8","tertiaryBorderColor":"#D97706","lineColor":"#5B6475","fontFamily":"Inter, BIZ UDPGothic, sans-serif","fontSize":"16px","clusterBkg":"#FFFFFF","clusterBorder":"#D7DEEA"},"flowchart":{"nodeSpacing":34,"rankSpacing":48,"curve":"linear","htmlLabels":false}} }%%
+flowchart LR
+    subgraph OLD[旧UI]
+        direction TB
+        A[simple_video\n統合UI]
+        B[入口が不明瞭]
+        C[機能は強力]
+        A --> B
+        A --> C
+    end
+
+    subgraph NEW[新UI]
+        direction TB
+        D[Music Video Studio\n制作導線UI]
+        E[開始点が明確]
+        F[差し替えやすい]
+        G[既存資産を活用]
+        D --> E
+        D --> F
+        D --> G
+    end
+    classDef core fill:#EAF1FF,stroke:#4C6FFF,color:#1F2A44,stroke-width:1.4px;
+    classDef assist fill:#EDF9F1,stroke:#2E9B62,color:#163828,stroke-width:1.4px;
+    class A,D core;
+    class B,C,E,F,G assist;

@@ -1,0 +1,13 @@
+%%{init: {"theme":"base","themeVariables":{"background":"#FFFFFF","primaryColor":"#EAF1FF","primaryBorderColor":"#4C6FFF","primaryTextColor":"#1F2A44","secondaryColor":"#EDF9F1","secondaryBorderColor":"#2E9B62","tertiaryColor":"#FFF4E8","tertiaryBorderColor":"#D97706","lineColor":"#5B6475","fontFamily":"Inter, BIZ UDPGothic, sans-serif","fontSize":"16px","clusterBkg":"#FFFFFF","clusterBorder":"#D7DEEA"},"flowchart":{"nodeSpacing":36,"rankSpacing":46,"curve":"linear","htmlLabels":false}} }%%
+flowchart LR
+    A[Story\nidea / scenario] --> B[Music\nlyrics / tags / audio] --> C[Scene Image\ncount / prompts / images] --> D[Scene Video\nprompts / videos / transitions] --> E[Final MV\nclip / movie]
+
+    A -.手修正.-> A
+    B -.歌詞 / タグ再生成.-> B
+    C -.尺・遷移 / 画像修正.-> C
+    D -.動画差し替え / 遷移調整.-> D
+    E -.戻る.-> B
+    E -.戻る.-> C
+    E -.戻る.-> D
+    classDef core fill:#EAF1FF,stroke:#4C6FFF,color:#1F2A44,stroke-width:1.4px;
+    class A,B,C,D,E core;

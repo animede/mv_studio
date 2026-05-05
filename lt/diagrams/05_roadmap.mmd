@@ -1,0 +1,11 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#E8F0FF","primaryBorderColor":"#4C6FFF","primaryTextColor":"#1F2A44","secondaryColor":"#EEF9F1","secondaryBorderColor":"#2E9B62","tertiaryColor":"#FFF3E8","tertiaryBorderColor":"#D97706","lineColor":"#5B6475","fontFamily":"Inter, BIZ UDPGothic, sans-serif","fontSize":"16px","clusterBkg":"#F7F9FC","clusterBorder":"#C7D2E3"},"flowchart":{"nodeSpacing":28,"rankSpacing":42,"curve":"basis","htmlLabels":false}} }%%
+flowchart TB
+	Now[現在\nSTEP中心UI]
+	Now --> Next1[タイムラインUI]
+	Now --> Next2[音源解析で尺最適化]
+	Now --> Next3[シーン単位スタイル制御]
+	Now --> Next4[再同期 / 再編集の可視化]
+	classDef core fill:#E8F0FF,stroke:#4C6FFF,color:#1F2A44,stroke-width:1.4px;
+	classDef ai fill:#EEF9F1,stroke:#2E9B62,color:#163828,stroke-width:1.4px;
+	class Now core;
+	class Next1,Next2,Next3,Next4 ai;

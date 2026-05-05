@@ -1,0 +1,13 @@
+flowchart TD
+	A[Story Step\nidea / world / scenario] --> B[Music Step\nlyrics / tags / arrangement / audio]
+	B --> C[Scene Image Step\nscene count / durations / prompts / images]
+	C --> D[Scene Video Step\nvideo prompts / videos / transitions]
+	D --> E[Final MV Step\nclip / final movie]
+
+	A -.手修正 / 再生成.-> A
+	B -.歌詞だけ / タグだけ再生成.-> B
+	C -.尺・遷移再提案 / プロンプト修正 / 画像差し替え.-> C
+	D -.動画差し替え / 遷移再調整.-> D
+	E -.再編集導線で戻る.-> B
+	E -.再編集導線で戻る.-> C
+	E -.再編集導線で戻る.-> D

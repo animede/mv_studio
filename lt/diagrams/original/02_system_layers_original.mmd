@@ -1,0 +1,13 @@
+flowchart TD
+	U[ユーザー] --> GUI[Music Video Studio UI\nproduction frontend]
+	GUI --> API[FastAPI 制御層\napp_production.py]
+	API --> STATE[制作状態\ndata/production_sessions]
+	API --> LEGACY[既存ロジック資産\nsimple_video 系知見]
+	API --> AI[AI / 生成基盤]
+
+	AI --> LLM[LLM\n構成・歌詞・タグ・尺・遷移・プロンプト補助]
+	AI --> IMG[画像生成モデル\nT2I / I2I]
+	AI --> VID[動画生成モデル\nI2V / FLF / LTX]
+	AI --> MUS[音楽生成モデル\nACE-Step 等]
+
+	API --> MEDIA[成果物管理\nimage / video / audio / movie]
