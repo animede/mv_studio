@@ -163,6 +163,12 @@
     const uploadedCount = state.items.filter((item) => item.sourceType === 'uploaded').length;
     const importedCount = state.items.filter((item) => item.sourceType === 'imported').length;
     const generatedCount = state.items.filter((item) => item.sourceType === 'generated').length;
+    if (els.summaryMeta) {
+      els.summaryMeta.innerHTML = `
+        <div class="mv-library-summary-meta-item"><strong>最終取得</strong><span>${escapeHtml(state.loadedAt ? formatDateTime(state.loadedAt) : '未取得')}</span></div>
+        <div class="mv-library-summary-meta-item"><strong>セッションID</strong><span>${escapeHtml(getSessionId())}</span></div>
+      `;
+    }
     els.summary.innerHTML = `
       <div class="canvas-summary-grid mv-library-summary-cards">
         <div class="summary-card summary-card-primary"><span class="summary-key">総件数</span><strong>${escapeHtml(state.totalCount || state.items.length)}</strong></div>
@@ -171,10 +177,6 @@
         <div class="summary-card"><span class="summary-key">アップロード</span><strong>${escapeHtml(uploadedCount)}</strong></div>
         <div class="summary-card"><span class="summary-key">フォルダ取込</span><strong>${escapeHtml(importedCount)}</strong></div>
       </div>
-      <ul class="detail-list mv-library-summary-list">
-        <li><strong>最終取得</strong>${escapeHtml(state.loadedAt ? formatDateTime(state.loadedAt) : '未取得')}</li>
-        <li><strong>セッションID</strong>${escapeHtml(getSessionId())}</li>
-      </ul>
     `;
   }
 
@@ -182,8 +184,7 @@
     els.actionContent.innerHTML = `
       <div class="mv-library-manage-grid">
         <section class="mv-library-manage-card">
-          <h4>UIから動画を登録</h4>
-          <p class="field-help">手元のMVファイルをアップロードして output/movie に登録します。</p>
+          <h4>MV動画を登録(ファイル毎)</h4>
           <label class="preset-select-group">
             <span class="field-label">動画ファイル</span>
             <input id="mvLibraryUploadInput" class="text-input" type="file" accept="video/*,.mp4,.mov,.webm,.mkv,.avi" ${state.uploadBusy ? 'disabled' : ''} />
@@ -194,7 +195,7 @@
           </label>
           <label class="preset-select-group">
             <span class="field-label">メモ</span>
-            <textarea id="mvLibraryUploadMemoInput" class="prompt-textarea generated-mv-note-input" rows="3" placeholder="補足メモや管理メモ" ${state.uploadBusy ? 'disabled' : ''}></textarea>
+            <textarea id="mvLibraryUploadMemoInput" class="prompt-textarea generated-mv-note-input" rows="2" placeholder="補足メモや管理メモ" ${state.uploadBusy ? 'disabled' : ''}></textarea>
           </label>
           <div class="generated-mv-links">
             <button id="mvLibraryUploadBtn" class="detail-action-btn primary" type="button" ${state.uploadBusy ? 'disabled' : ''}>${state.uploadBusy ? '⏳ 登録中...' : '⬆️ アップロード登録'}</button>
@@ -539,6 +540,7 @@
     Object.assign(els, {
       status: $('mvLibraryStatus'),
       summary: $('mvLibrarySummary'),
+      summaryMeta: $('mvLibrarySummaryMeta'),
       actionContent: $('mvLibraryActionContent'),
       listContent: $('mvLibraryListContent'),
     });

@@ -391,6 +391,16 @@ select {
   font-size: 13px;
 }
 
+.canvas-library-link-row {
+  display: flex;
+}
+
+.canvas-library-link {
+  width: 100%;
+  justify-content: center;
+  text-align: center;
+}
+
 .text-input,
 .select-input {
   width: 100%;
@@ -1743,6 +1753,10 @@ select {
   min-height: 44px;
 }
 
+#mvLibraryUploadMemoInput.generated-mv-note-input {
+  min-height: 72px;
+}
+
 .generated-mv-player {
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -1846,8 +1860,38 @@ select {
   margin-top: 12px;
 }
 
+.mv-library-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  justify-content: flex-end;
+  align-items: flex-start;
+  margin-left: auto;
+  text-align: right;
+}
+
+.mv-library-summary-meta-item {
+  display: grid;
+  gap: 2px;
+}
+
+.mv-library-summary-meta-item strong {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mv-library-summary-meta-item span {
+  color: var(--text);
+  font-size: 13px;
+}
+
 .mv-library-summary-cards {
   margin-top: 4px;
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  max-width: calc(160px * 8 + 14px * 7);
+  margin-inline: auto;
 }
 
 @media (max-width: 1180px) {
@@ -1900,6 +1944,12 @@ select {
 
   .mv-library-header {
     flex-direction: column;
+  }
+
+  .mv-library-summary-meta {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
   }
 }
 
