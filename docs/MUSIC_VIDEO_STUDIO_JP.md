@@ -1,6 +1,6 @@
 # Music Video Studio 変更ドキュメント
 
-最終更新: 2026-04-24
+最終更新: 2026-05-05
 
 ## 概要
 
@@ -33,7 +33,9 @@
 
 - 新GUIのエントリ: [app_production.py](../app_production.py)
 - 新GUIのHTML: [static/music_video_studio.html](../static/music_video_studio.html)
+- 生成済みMV一覧HTML: [static/mv_library.html](../static/mv_library.html)
 - 新GUIのJS: [static/js/music_video_studio.js](../static/js/music_video_studio.js)
+- 生成済みMV一覧JS: [static/js/mv_library.js](../static/js/mv_library.js)
 - 新GUIのCSS: [static/css/music_video_studio.css](../static/css/music_video_studio.css)
 - 新GUIの起動スクリプト: [start_production.sh](../start_production.sh)
 
@@ -97,6 +99,14 @@ python -m uvicorn app_production:app --host 127.0.0.1 --port 8091 --reload
 - 設定項目
 - 出力物
 - 次工程への受け渡し内容
+
+### 生成済みMV一覧: 専用ブラウザ画面
+
+- 完成MV STEP から専用画面へ遷移
+- `output/movie` の最近のMV一覧を表示
+- UIからMVアップロード登録
+- 任意フォルダからMVインポート
+- タイトル / メモ付き管理
 
 ## モード設計
 
@@ -162,6 +172,7 @@ python -m uvicorn app_production:app --host 127.0.0.1 --port 8091 --reload
 
 - 共通状態: [data/production_state.json](../data/production_state.json)
 - セッション別状態: [data/production_sessions](../data/production_sessions)
+- MVライブラリ管理情報: [data/mv_library.json](../data/mv_library.json)
 
 ## 新GUIのAPI
 
@@ -171,6 +182,7 @@ python -m uvicorn app_production:app --host 127.0.0.1 --port 8091 --reload
 
 - `GET /`
 - `GET /music_video_studio.html`
+- `GET /mv_library.html`
 
 ### 設定取得
 
@@ -180,6 +192,13 @@ python -m uvicorn app_production:app --host 127.0.0.1 --port 8091 --reload
 
 - `GET /api/v1/production/state`
 - `POST /api/v1/production/state`
+
+### 生成済みMV一覧 / ライブラリ管理
+
+- `GET /api/v1/production/final-mv/list`
+- `POST /api/v1/production/final-mv/library/upload`
+- `POST /api/v1/production/final-mv/library/import-folder`
+- `POST /api/v1/production/final-mv/library/metadata`
 
 ### プリセット取得
 
@@ -223,7 +242,9 @@ bash start.sh
 - [app_production.py](../app_production.py)
 - [start_production.sh](../start_production.sh)
 - [static/music_video_studio.html](../static/music_video_studio.html)
+- [static/mv_library.html](../static/mv_library.html)
 - [static/js/music_video_studio.js](../static/js/music_video_studio.js)
+- [static/js/mv_library.js](../static/js/mv_library.js)
 - [static/css/music_video_studio.css](../static/css/music_video_studio.css)
 
 ### ドキュメント / 起動方針更新

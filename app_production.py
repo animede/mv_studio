@@ -4,6 +4,7 @@ import base64
 import json
 import math
 import os
+import hashlib
 import random
 import re
 import shutil
@@ -13,6 +14,7 @@ import uuid
 from threading import Lock
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -53,6 +55,8 @@ PREVIEW_STATE_DIR = DATA_DIR / "production_sessions"
 PREVIEW_STATE_FILE = DATA_DIR / "production_state.json"
 REF_IMAGES_DIR = DATA_DIR / "ref_images"
 REF_IMAGES_INDEX = DATA_DIR / "ref_images.json"
+MV_LIBRARY_INDEX = DATA_DIR / "mv_library.json"
+MV_THUMBNAIL_DIR = DATA_DIR / "mv_thumbnails"
 
 
 def _is_comfyui_dir(path: Path) -> bool:
@@ -269,6 +273,26 @@ class PreviewMusicTrimRequest(BaseModel):
     original_filename: Optional[str] = None
 
 
+class PreviewMusicRepaintRequest(BaseModel):
+    client_session_id: Optional[str] = None
+    filename: str
+    repainting_start: float = 0.0
+    repainting_end: float = 0.0
+    tags: str
+    lyrics: Optional[str] = None
+    language: str = "ja"
+    duration: int = 30
+    bpm: Optional[int] = None
+    timesignature: str = "4"
+    keyscale: Optional[str] = None
+    steps: int = 8
+    cfg: float = 3.0
+    seed: Optional[int] = None
+    thinking: bool = False
+    source: Optional[str] = None
+    original_filename: Optional[str] = None
+
+
 class PreviewScenePromptGenerateRequest(BaseModel):
     scenario_text: Optional[str] = None
     world_notes: Optional[str] = None
@@ -276,6 +300,7 @@ class PreviewScenePromptGenerateRequest(BaseModel):
     arrangement_notes: Optional[str] = None
     music_tags: Optional[str] = None
     character_context: Optional[str] = None
+    visual_style: Optional[str] = "anime"
     scene_count: Optional[int] = 5
     target_duration_sec: Optional[int] = 30
     pipeline_preset_id: Optional[str] = None
@@ -304,7 +329,9 @@ class PreviewScenePlanGenerateRequest(BaseModel):
     lyrics_text: Optional[str] = None
     world_notes: Optional[str] = None
     arrangement_notes: Optional[str] = None
+    scene_prompt_texts: List[str] = Field(default_factory=list)
     scene_count: Optional[int] = 5
+    propose_scene_count: Optional[bool] = False
     target_duration_sec: Optional[int] = 30
     pipeline_preset_id: Optional[str] = None
     workflow_mode: Optional[str] = None
@@ -323,6 +350,7 @@ class PreviewSceneImageGenerateRequest(BaseModel):
     client_session_id: Optional[str] = None
     scene_index: int = 1
     prompt: str
+    visual_style: Optional[str] = "anime"
     input_images: List[str] = Field(default_factory=list)
     cfg: float = 1.0
     denoise: float = 1.0
@@ -332,6 +360,7 @@ class PreviewSceneVideoGenerateRequest(BaseModel):
     client_session_id: Optional[str] = None
     scene_index: int = 1
     prompt: Optional[str] = None
+    visual_style: Optional[str] = "anime"
     image_filename: str
     end_image_filename: Optional[str] = None
     duration_sec: int = 5
@@ -349,6 +378,20 @@ class PreviewFinalMVRenderRequest(BaseModel):
     fps: int = 16
     xfade_transitions: List[str] = Field(default_factory=list)
     xfade_duration: Optional[float] = 0.5
+
+
+class ProductionMVLibraryImportFolderRequest(BaseModel):
+    client_session_id: Optional[str] = None
+    folder_path: str
+    recursive: bool = True
+
+
+class ProductionMVLibraryMetadataRequest(BaseModel):
+    client_session_id: Optional[str] = None
+    filename: str
+    subfolder: Optional[str] = None
+    title: Optional[str] = None
+    memo: Optional[str] = None
 
 
 class PreviewVLMAnalyzeRequest(BaseModel):
@@ -415,6 +458,17 @@ def _preview_audio_dir(session_id: Optional[str]) -> Path:
     return audio_dir
 
 
+def _preview_movie_dir() -> Path:
+    movie_dir = OUTPUT_DIR / "movie"
+    movie_dir.mkdir(parents=True, exist_ok=True)
+    return movie_dir
+
+
+def _mv_thumbnail_dir() -> Path:
+    MV_THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+    return MV_THUMBNAIL_DIR
+
+
 def _preview_ref_index_file(session_id: Optional[str]) -> Path:
     return _preview_session_dir(session_id) / "ref_images.json"
 
@@ -436,10 +490,203 @@ def _write_preview_ref_index(data: Dict[str, Dict[str, Any]], session_id: Option
     idx_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _read_mv_library_index() -> Dict[str, Dict[str, Any]]:
+    if not MV_LIBRARY_INDEX.exists():
+        return {}
+    try:
+        loaded = json.loads(MV_LIBRARY_INDEX.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_mv_library_index(data: Dict[str, Dict[str, Any]]) -> None:
+    MV_LIBRARY_INDEX.parent.mkdir(parents=True, exist_ok=True)
+    MV_LIBRARY_INDEX.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _mv_library_media_key(filename: str, subfolder: Optional[str] = None) -> str:
+    safe_filename = _safe_name(filename)
+    normalized_subfolder = str(subfolder or "").strip().replace("\\", "/").strip("/")
+    return f"{normalized_subfolder}/{safe_filename}".strip("/").lower()
+
+
+def _default_mv_library_title(path: Path) -> str:
+    stem = str(path.stem or path.name or "MV").strip()
+    return stem.replace("_", " ").strip() or str(path.name or "MV")
+
+
+def _find_mv_library_entry_by_import_source(index: Dict[str, Dict[str, Any]], source_path: Path) -> Optional[Dict[str, Any]]:
+    wanted = str(source_path.expanduser().resolve())
+    for item in index.values():
+        if not isinstance(item, dict):
+            continue
+        imported_from = str(item.get("imported_from") or "").strip()
+        if imported_from and imported_from == wanted:
+            return item
+    return None
+
+
+def _build_mv_library_item(
+    path: Path,
+    client_session_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = _build_preview_media_payload(path, client_session_id, "video")
+    meta = metadata if isinstance(metadata, dict) else {}
+    try:
+        stat = path.stat()
+        file_updated_at = int(stat.st_mtime)
+        size_bytes = int(stat.st_size)
+    except Exception:
+        file_updated_at = 0
+        size_bytes = 0
+
+    try:
+        duration_sec = round(_probe_preview_media_duration(path), 2)
+    except Exception:
+        duration_sec = None
+
+    metadata_updated_at = int(float(meta.get("updated_at") or 0) or 0)
+    payload.update(
+        {
+            "id": str(meta.get("id") or _mv_library_media_key(payload.get("filename") or path.name, payload.get("subfolder"))),
+            "kind": str(meta.get("kind") or _classify_generated_movie_kind(path)),
+            "title": str(meta.get("title") or _default_mv_library_title(path)),
+            "memo": str(meta.get("memo") or ""),
+            "source_type": str(meta.get("source_type") or "generated"),
+            "thumbnail_url": (
+                f"/api/v1/production/mv-thumbnail/{_safe_name(path.name)}"
+                f"?client_session_id={_safe_session_id(client_session_id)}"
+                f"&subfolder={payload.get('subfolder') or ''}"
+            ),
+            "original_filename": str(meta.get("original_filename") or path.name),
+            "imported_from": str(meta.get("imported_from") or ""),
+            "registered_at": int(float(meta.get("registered_at") or meta.get("created_at") or 0) or 0),
+            "file_updated_at": file_updated_at,
+            "metadata_updated_at": metadata_updated_at,
+            "updated_at": max(file_updated_at, metadata_updated_at),
+            "size_bytes": size_bytes,
+            "duration_sec": duration_sec,
+        }
+    )
+    return payload
+
+
+def _register_mv_library_path(
+    path: Path,
+    *,
+    title: Optional[str] = None,
+    memo: Optional[str] = None,
+    source_type: Optional[str] = None,
+    original_filename: Optional[str] = None,
+    imported_from: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Media not found: {path.name}")
+
+    try:
+        subfolder = str(path.parent.relative_to(OUTPUT_DIR)).replace("\\", "/")
+        if subfolder == ".":
+            subfolder = ""
+    except Exception:
+        subfolder = ""
+
+    index = _read_mv_library_index()
+    media_key = _mv_library_media_key(path.name, subfolder)
+    existing = index.get(media_key, {}) if isinstance(index.get(media_key), dict) else {}
+    now = int(time.time())
+    entry = {
+        "id": str(existing.get("id") or media_key),
+        "filename": path.name,
+        "subfolder": subfolder,
+        "kind": _classify_generated_movie_kind(path),
+        "title": str(title if title is not None else existing.get("title") or _default_mv_library_title(path)).strip() or _default_mv_library_title(path),
+        "memo": str(memo if memo is not None else existing.get("memo") or "").strip(),
+        "source_type": str(source_type or existing.get("source_type") or "generated"),
+        "original_filename": str(original_filename or existing.get("original_filename") or path.name),
+        "imported_from": str(imported_from if imported_from is not None else existing.get("imported_from") or "").strip(),
+        "created_at": int(float(existing.get("created_at") or now) or now),
+        "registered_at": int(float(existing.get("registered_at") or existing.get("created_at") or now) or now),
+        "updated_at": now,
+    }
+    index[media_key] = entry
+    _write_mv_library_index(index)
+    return entry
+
+
+def _store_uploaded_mv_file(upload: UploadFile) -> Path:
+    source_name = _safe_name(upload.filename or "uploaded_mv.mp4")
+    suffix = str(Path(source_name).suffix or "").lower()
+    if not suffix:
+        suffix = ".mp4"
+    if _classify_preview_media_type(Path(f"dummy{suffix}")) != "video":
+        raise HTTPException(status_code=400, detail="Only video files can be registered")
+    return _preview_movie_dir() / f"library_upload_{Path(source_name).stem}_{uuid.uuid4().hex[:8]}{suffix}"
+
+
+def _copy_mv_file_to_library(source_path: Path) -> Path:
+    safe_name = _safe_name(source_path.name or "imported_mv.mp4")
+    suffix = str(Path(safe_name).suffix or source_path.suffix or ".mp4")
+    if _classify_preview_media_type(Path(f"dummy{suffix}")) != "video":
+        raise HTTPException(status_code=400, detail=f"Unsupported video file: {source_path.name}")
+    destination = _preview_movie_dir() / f"library_import_{Path(safe_name).stem}_{uuid.uuid4().hex[:8]}{suffix}"
+    shutil.copy2(source_path, destination)
+    return destination
+
+
+def _is_path_within(path: Path, base_dir: Path) -> bool:
+    try:
+        path.resolve().relative_to(base_dir.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _get_mv_library_subfolder(path: Path) -> str:
+    for root in [OUTPUT_DIR, COMFY_OUTPUT_DIR]:
+        try:
+            relative_parent = path.parent.resolve().relative_to(root.resolve())
+            subfolder = str(relative_parent).replace("\\", "/")
+            return "" if subfolder == "." else subfolder
+        except Exception:
+            continue
+    return ""
+
+
 def _safe_name(filename: str) -> str:
     raw = Path(str(filename or "upload.bin")).name
     raw = raw.replace("..", "_").replace("/", "_").replace("\\", "_")
     return raw or "upload.bin"
+
+
+def _resolve_ace_step_audio_download(file_path: str) -> tuple[str, str]:
+    raw = str(file_path or "").strip()
+    if not raw:
+        raise RuntimeError("ACE-Step API returned an empty audio path")
+
+    parsed = urlparse(raw)
+    query = parse_qs(parsed.query)
+    source_path = str(query.get("path", [""])[0] or "").strip()
+
+    if source_path:
+        download_url = f"{ACE_STEP_URL}/v1/audio?{urlencode({'path': source_path})}"
+        local_name = Path(source_path).name or "audio.mp3"
+        return download_url, local_name
+
+    if parsed.scheme and parsed.netloc:
+        download_url = raw
+        local_name = Path(parsed.path).name or "audio.mp3"
+        return download_url, local_name
+
+    if raw.startswith("/"):
+        download_url = f"{ACE_STEP_URL}{raw}"
+        local_name = Path(parsed.path).name or "audio.mp3"
+        return download_url, local_name
+
+    download_url = f"{ACE_STEP_URL}/{raw.lstrip('/')}"
+    local_name = Path(parsed.path or raw).name or "audio.mp3"
+    return download_url, local_name
 
 
 def _normalize_openai_base_url(url: str) -> str:
@@ -916,6 +1163,7 @@ async def _generate_preview_scene_duration_plan(
     *,
     scenario_text: str,
     lyrics_text: str,
+    scene_prompt_texts: Optional[List[str]] = None,
     scene_count: int,
     target_duration_sec: int,
     workflow_mode: Optional[str] = None,
@@ -929,9 +1177,22 @@ async def _generate_preview_scene_duration_plan(
         workflow_mode=workflow_mode,
         pipeline_preset_id=pipeline_preset_id,
     )
-    source_text = str(scenario_text or "").strip() or str(lyrics_text or "").strip()
+    prompt_lines = [str(item or "").strip() for item in list(scene_prompt_texts or [])]
+    source_text = (
+        str(scenario_text or "").strip()
+        or str(lyrics_text or "").strip()
+        or "\n".join(line for line in prompt_lines if line)
+    )
     if not source_text:
         return _fallback_preview_duration_plan(count, target, min_scene_sec, max_scene_sec)
+
+    while len(prompt_lines) < count:
+        prompt_lines.append("")
+    prompt_lines = prompt_lines[:count]
+    prompt_block = "\n".join(
+        f"#{idx + 1}: {prompt_lines[idx] or '(none)'}"
+        for idx in range(count)
+    )
 
     system_prompt = (
         "You are a music-video editor deciding how long each scene should naturally last. "
@@ -945,7 +1206,9 @@ async def _generate_preview_scene_duration_plan(
         f"Allowed per-scene duration range: {min_scene_sec} to {max_scene_sec} seconds\n"
         "Task: propose natural relative durations for each scene before normalization. "
         "Longer durations fit establishing shots, emotional pauses, dance phrases, or gradual reveals. "
-        "Shorter durations fit transitions, punchy beats, quick reactions, or inserts.\n\n"
+        "Shorter durations fit transitions, punchy beats, quick reactions, or inserts. "
+        "Use scene prompts when available to differentiate scenes.\n\n"
+        f"SCENE_PROMPTS:\n{prompt_block or '(none)'}\n\n"
         f"SCENARIO:\n{scenario_text or '(none)'}\n\n"
         f"LYRICS:\n{lyrics_text or '(none)'}"
     )
@@ -976,6 +1239,7 @@ async def _generate_preview_scene_duration_plan_with_count(
     *,
     scenario_text: str,
     lyrics_text: str,
+    scene_prompt_texts: Optional[List[str]] = None,
     scene_count: int,
     target_duration_sec: int,
     workflow_mode: Optional[str] = None,
@@ -990,7 +1254,12 @@ async def _generate_preview_scene_duration_plan_with_count(
         pipeline_preset_id=pipeline_preset_id,
     )
     fallback_count = preferred_count if propose_scene_count else max(min_count, min(max_count, requested_count))
-    source_text = str(scenario_text or "").strip() or str(lyrics_text or "").strip()
+    prompt_lines = [str(item or "").strip() for item in list(scene_prompt_texts or [])]
+    source_text = (
+        str(scenario_text or "").strip()
+        or str(lyrics_text or "").strip()
+        or "\n".join(line for line in prompt_lines if line)
+    )
 
     if not source_text:
         min_scene_sec, max_scene_sec = _preview_scene_duration_bounds(
@@ -1006,6 +1275,13 @@ async def _generate_preview_scene_duration_plan_with_count(
         target,
         workflow_mode=workflow_mode,
         pipeline_preset_id=pipeline_preset_id,
+    )
+    while len(prompt_lines) < fallback_count:
+        prompt_lines.append("")
+    prompt_lines = prompt_lines[:fallback_count]
+    prompt_block = "\n".join(
+        f"#{idx + 1}: {prompt_lines[idx] or '(none)'}"
+        for idx in range(fallback_count)
     )
     system_prompt = (
         "You are a music-video editor deciding natural scene count and duration balance. "
@@ -1028,7 +1304,9 @@ async def _generate_preview_scene_duration_plan_with_count(
         + f"Allowed per-scene duration range: {min_scene_sec} to {max_scene_sec} seconds\n"
         + "Task: propose natural relative durations for each scene before normalization. "
           "Longer durations fit establishing shots, emotional pauses, dance phrases, or gradual reveals. "
-          "Shorter durations fit transitions, punchy beats, quick reactions, or inserts.\n\n"
+                    "Shorter durations fit transitions, punchy beats, quick reactions, or inserts. "
+                    "Use scene prompts when available to differentiate scenes.\n\n"
+                + f"SCENE_PROMPTS:\n{prompt_block or '(none)'}\n\n"
         + f"SCENARIO:\n{scenario_text or '(none)'}\n\n"
         + f"LYRICS:\n{lyrics_text or '(none)'}"
     )
@@ -1340,6 +1618,7 @@ async def _generate_preview_scene_transition_plan(
     lyrics_text: str = "",
     world_notes: str = "",
     arrangement_notes: str = "",
+    scene_prompt_texts: Optional[List[str]] = None,
     durations: Optional[List[int]] = None,
     pipeline_preset_id: str = "",
     workflow_mode: str = "",
@@ -1355,13 +1634,17 @@ async def _generate_preview_scene_transition_plan(
         pipeline_preset_id=pipeline_preset_id,
         workflow_mode=workflow_mode,
     )
-    source_text = "\n".join(filter(None, [str(scenario_text or "").strip(), str(lyrics_text or "").strip(), str(world_notes or "").strip(), str(arrangement_notes or "").strip()]))
+    prompt_lines = [str(item or "").strip() for item in list(scene_prompt_texts or [])]
+    source_text = "\n".join(filter(None, [str(scenario_text or "").strip(), str(lyrics_text or "").strip(), str(world_notes or "").strip(), str(arrangement_notes or "").strip(), *prompt_lines]))
     if not source_text:
         return fallback, fallback_reasons
 
     resolved_durations = list(durations or [])[:count]
     while len(resolved_durations) < count:
         resolved_durations.append(5)
+    while len(prompt_lines) < count:
+        prompt_lines.append("")
+    prompt_lines = prompt_lines[:count]
     lyric_units = _extract_lyric_units(lyrics_text)
     outline = _build_story_outline(scenario_text, count)
     profile = _preview_transition_rule_profile(pipeline_preset_id, workflow_mode)
@@ -1371,7 +1654,7 @@ async def _generate_preview_scene_transition_plan(
     scene_lines = []
     for idx in range(count):
         scene_lines.append(
-            f"#{idx + 1}: duration={resolved_durations[idx]}s | outline={outline[idx] if idx < len(outline) else '(none)'} | lyric={_pick_scene_lyric_excerpt(lyric_units, idx, count) or '(none)'}"
+            f"#{idx + 1}: duration={resolved_durations[idx]}s | prompt={prompt_lines[idx] or '(none)'} | outline={outline[idx] if idx < len(outline) else '(none)'} | lyric={_pick_scene_lyric_excerpt(lyric_units, idx, count) or '(none)'}"
         )
 
     system_prompt = (
@@ -1434,6 +1717,7 @@ def _fallback_scene_prompt_generate(
     arrangement_notes: str = "",
     music_tags: str = "",
     character_context: str = "",
+    visual_style: str = "anime",
     scene_count: int = 5,
     target_duration_sec: int = 30,
     pipeline_preset_id: str = "",
@@ -1462,6 +1746,7 @@ def _fallback_scene_prompt_generate(
     arrangement_text = str(arrangement_notes or "").strip()
     tags_text = str(music_tags or "").strip()
     character_text = str(character_context or "").strip()
+    style_hint = _preview_scene_visual_style_hint(visual_style)
 
     items: List[Dict[str, Any]] = []
     for idx in range(scene_count):
@@ -1482,6 +1767,8 @@ def _fallback_scene_prompt_generate(
             prompt_parts.append(tags_text)
         if character_text:
             prompt_parts.append(character_text)
+        if style_hint:
+            prompt_parts.append(style_hint)
         prompt_parts.extend([
             "coherent character identity",
             "strong lighting and color contrast",
@@ -1499,6 +1786,25 @@ def _fallback_scene_prompt_generate(
             }
         )
     return items
+
+
+def _normalize_preview_scene_visual_style(value: Optional[str]) -> str:
+    normalized = str(value or "anime").strip().lower()
+    allowed = {"anime", "realistic", "illustration", "cinematic", "line_art", "pixel_art"}
+    return normalized if normalized in allowed else "anime"
+
+
+def _preview_scene_visual_style_hint(value: Optional[str]) -> str:
+    normalized = _normalize_preview_scene_visual_style(value)
+    mapping = {
+        "anime": "anime cel illustration, anime background, clean linework, not photorealistic",
+        "realistic": "photorealistic live-action look, realistic background, natural textures, not illustrated",
+        "illustration": "stylized illustration, painterly background, graphic art feel",
+        "cinematic": "cinematic film still, movie production design, realistic lighting, grounded detail",
+        "line_art": "clean line art, simplified shading, crisp contours, illustration background",
+        "pixel_art": "pixel art, sprite-like shapes, low-resolution retro game aesthetic",
+    }
+    return mapping.get(normalized, mapping["anime"])
 
 
 def _sanitize_preview_ace_step_lyrics(text: str) -> str:
@@ -1744,8 +2050,8 @@ def _generate_music_audio_via_ace_step_api(
                         file_path = str((item or {}).get("file") or "").strip()
                         if not file_path:
                             continue
-                        audio_url = f"{ACE_STEP_URL}{file_path}"
-                        local_name = f"ace_step_{task_id}_{Path(file_path).name}"
+                        audio_url, source_name = _resolve_ace_step_audio_download(file_path)
+                        local_name = f"ace_step_{task_id}_{source_name}"
                         local_path = audio_dir / local_name
                         download_response = requests.get(audio_url, timeout=60)
                         if download_response.ok:
@@ -1765,6 +2071,126 @@ def _generate_music_audio_via_ace_step_api(
         time.sleep(3.0)
 
     raise RuntimeError("ACE-Step API generation timed out")
+
+
+def _generate_music_audio_via_ace_step_multipart(
+    *,
+    task_type: str,
+    client_session_id: Optional[str],
+    source_path: Path,
+    tags: str,
+    lyrics: str,
+    language: str,
+    duration: int,
+    bpm: Optional[int],
+    timesignature: str,
+    keyscale: Optional[str],
+    steps: int,
+    cfg: float,
+    seed: Optional[int],
+    thinking: bool,
+    repainting_start: Optional[float] = None,
+    repainting_end: Optional[float] = None,
+) -> Dict[str, Any]:
+    if not ACE_STEP_URL:
+        raise RuntimeError("ACE-Step API is not configured")
+
+    normalized_task_type = str(task_type or "").strip().lower()
+    if normalized_task_type not in {"cover", "repaint"}:
+        raise RuntimeError(f"Unsupported ACE-Step multipart task type: {task_type}")
+
+    try:
+        src_audio_bytes = source_path.read_bytes()
+    except Exception as exc:
+        raise RuntimeError(f"Could not read source audio: {exc}") from exc
+
+    data: Dict[str, Any] = {
+        "prompt": tags,
+        "lyrics": lyrics,
+        "thinking": str(bool(thinking)).lower(),
+        "vocal_language": language,
+        "audio_duration": str(int(duration)),
+        "time_signature": str(timesignature),
+        "batch_size": "1",
+        "audio_format": "mp3",
+        "inference_steps": str(int(steps)),
+        "guidance_scale": str(float(cfg)),
+        "task_type": normalized_task_type,
+    }
+    if bpm is not None:
+        data["bpm"] = str(int(bpm))
+    if keyscale:
+        data["key_scale"] = str(keyscale)
+    if seed is not None:
+        data["seed"] = str(int(seed))
+    if normalized_task_type == "repaint":
+        data["repainting_start"] = str(float(repainting_start or 0.0))
+        data["repainting_end"] = str(float(repainting_end or 0.0))
+
+    files = {
+        "src_audio": (source_path.name, src_audio_bytes),
+    }
+
+    try:
+        response = requests.post(
+            f"{ACE_STEP_URL}/release_task",
+            data=data,
+            files=files,
+            timeout=REQUEST_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"ACE-Step API connection error: {exc}") from exc
+    if not response.ok:
+        raise RuntimeError(f"ACE-Step API release_task failed: HTTP {response.status_code} {response.text[:300]}")
+
+    task_id = str((response.json().get("data") or {}).get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("ACE-Step API did not return task_id")
+
+    deadline = time.time() + 900
+    while time.time() < deadline:
+        poll_response = requests.post(
+            f"{ACE_STEP_URL}/query_result",
+            json={"task_id_list": [task_id]},
+            timeout=30,
+        )
+        if poll_response.ok:
+            data_list = poll_response.json().get("data", []) or []
+            if data_list:
+                task_data = data_list[0] or {}
+                status = int(task_data.get("status", 0) or 0)
+                if status == 1:
+                    result_json = task_data.get("result", "[]")
+                    results = json.loads(result_json) if isinstance(result_json, str) else result_json
+                    audio_dir = _preview_audio_dir(client_session_id)
+                    audio_dir.mkdir(parents=True, exist_ok=True)
+                    for item in (results if isinstance(results, list) else [results]):
+                        file_path = str((item or {}).get("file") or "").strip()
+                        if not file_path:
+                            continue
+                        audio_url, source_name = _resolve_ace_step_audio_download(file_path)
+                        local_name = f"ace_step_{normalized_task_type}_{task_id}_{source_name}"
+                        local_path = audio_dir / local_name
+                        download_response = requests.get(audio_url, timeout=60)
+                        if download_response.ok:
+                            local_path.write_bytes(download_response.content)
+                            duration_sec = round(_probe_preview_media_duration(local_path), 2)
+                            return {
+                                "filename": local_name,
+                                "subfolder": "",
+                                "type": "output",
+                                "media_type": "audio",
+                                "backend": f"ace-step-api-{normalized_task_type}",
+                                "prompt_id": task_id,
+                                "duration_sec": duration_sec,
+                            }
+                    raise RuntimeError("ACE-Step API finished but no audio file could be downloaded")
+                if status == 2:
+                    error_msg = task_data.get("result", "Unknown error")
+                    raise RuntimeError(f"ACE-Step API {normalized_task_type} failed: {error_msg}")
+        time.sleep(3.0)
+
+    raise RuntimeError(f"ACE-Step API {normalized_task_type} timed out")
 
 
 def _fallback_vlm_description(image_base64: str, mode: str, language: str, focus_area: Optional[str] = None) -> str:
@@ -1980,6 +2406,55 @@ def _probe_preview_media_duration(path: Path) -> float:
         return max(0.0, float(str(result.stdout or "").strip() or 0.0))
     except Exception as exc:
         raise RuntimeError(f"Could not read duration for {path.name}: {exc}") from exc
+
+
+def _mv_thumbnail_cache_path(path: Path) -> Path:
+    try:
+        stat = path.stat()
+        fingerprint = f"{path.resolve()}::{stat.st_size}::{stat.st_mtime_ns}"
+    except Exception:
+        fingerprint = str(path.resolve())
+    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()
+    return _mv_thumbnail_dir() / f"{digest}.jpg"
+
+
+def _ensure_mv_thumbnail(path: Path) -> Path:
+    thumb_path = _mv_thumbnail_cache_path(path)
+    if thumb_path.exists() and thumb_path.is_file():
+        return thumb_path
+
+    temp_path = thumb_path.with_suffix(".tmp.jpg")
+    try:
+        duration_sec = _probe_preview_media_duration(path)
+    except Exception:
+        duration_sec = 0.0
+    seek_sec = min(1.0, max(0.0, duration_sec * 0.2)) if duration_sec > 0 else 0.0
+    command = ["ffmpeg", "-y"]
+    if seek_sec > 0:
+        command.extend(["-ss", f"{seek_sec:.3f}"])
+    command.extend(
+        [
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=640:-2:force_original_aspect_ratio=decrease",
+            "-q:v",
+            "3",
+            str(temp_path),
+        ]
+    )
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0 or not temp_path.exists():
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        detail = str(result.stderr or "").strip()
+        raise RuntimeError(detail or f"ffmpeg thumbnail failed for {path.name}")
+    temp_path.replace(thumb_path)
+    return thumb_path
 
 
 def _trim_preview_audio_segment(
@@ -2247,6 +2722,105 @@ def _merge_preview_video_with_audio(video_path: Path, audio_path: Path) -> Path:
     return out_path
 
 
+def _classify_generated_movie_kind(path: Path) -> str:
+    name = str(path.name or "").lower()
+    if name.startswith("production_final_"):
+        return "final"
+    if name.startswith("production_concat_"):
+        return "clip"
+    if name.startswith("library_upload_"):
+        return "uploaded"
+    if name.startswith("library_import_"):
+        return "imported"
+    return "movie"
+
+
+def _list_generated_movie_items(
+    client_session_id: Optional[str],
+    *,
+    limit: int = 24,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    safe_limit = max(1, min(int(limit or 24), 60))
+    safe_offset = max(0, int(offset or 0))
+    library_index = _read_mv_library_index()
+    search_roots: List[Path] = []
+    seen_roots: set[str] = set()
+    for root in [OUTPUT_DIR / "movie", COMFY_OUTPUT_DIR / "movie"]:
+        try:
+            resolved = str(root.resolve())
+        except Exception:
+            resolved = str(root)
+        if resolved in seen_roots:
+            continue
+        seen_roots.add(resolved)
+        search_roots.append(root)
+
+    candidates_with_sort_key: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for root in search_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            candidates = sorted(
+                [path for path in root.rglob("*") if path.is_file() and _classify_preview_media_type(path) == "video"],
+                key=lambda path: float(path.stat().st_mtime),
+                reverse=True,
+            )
+        except Exception:
+            continue
+
+        for path in candidates:
+            try:
+                relative_parent = path.parent.relative_to(root)
+                subfolder = "" if str(relative_parent) == "." else str(relative_parent).replace("\\", "/")
+            except Exception:
+                subfolder = ""
+            media_key = _mv_library_media_key(path.name, subfolder)
+            if not media_key or media_key in seen_keys:
+                continue
+            seen_keys.add(media_key)
+            metadata = library_index.get(media_key) if isinstance(library_index.get(media_key), dict) else {}
+            metadata_updated_at = int(float(metadata.get("updated_at") or metadata.get("created_at") or 0) or 0)
+            try:
+                file_updated_at = int(path.stat().st_mtime)
+            except Exception:
+                file_updated_at = 0
+            candidates_with_sort_key.append(
+                {
+                    "path": path,
+                    "media_key": media_key,
+                    "sort_updated_at": max(file_updated_at, metadata_updated_at),
+                    "sort_subfolder": subfolder.lower(),
+                    "sort_filename": path.name.lower(),
+                }
+            )
+
+    candidates_with_sort_key.sort(
+        key=lambda item: (
+            -int(item.get("sort_updated_at") or 0),
+            str(item.get("sort_subfolder") or ""),
+            str(item.get("sort_filename") or ""),
+        )
+    )
+    total_count = len(candidates_with_sort_key)
+    selected_candidates = candidates_with_sort_key[safe_offset:safe_offset + safe_limit]
+    items = [
+        _build_mv_library_item(candidate["path"], client_session_id, library_index.get(candidate["media_key"]))
+        for candidate in selected_candidates
+    ]
+    next_offset = safe_offset + len(items)
+    return {
+        "items": items,
+        "count": len(items),
+        "total_count": total_count,
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "has_more": next_offset < total_count,
+        "next_offset": next_offset,
+    }
+
+
 def _queue_prompt_to_comfyui(workflow: Dict[str, Any]) -> str:
     url = f"http://{COMFYUI_SERVER}/prompt"
     response = requests.post(url, json={"prompt": workflow}, timeout=REQUEST_TIMEOUT_SEC)
@@ -2489,9 +3063,14 @@ def _find_recent_ready_preview_output(
     return None
 
 
-def _resolve_preview_media_source(filename: str, client_session_id: Optional[str]) -> Path:
+def _resolve_preview_media_source(
+    filename: str,
+    client_session_id: Optional[str],
+    subfolder: Optional[str] = None,
+) -> Path:
     safe_name = _safe_name(filename)
-    common_output_subfolders = ["image", "images", "audio", "video", "videos"]
+    normalized_subfolder = str(subfolder or "").strip().strip("/\\")
+    common_output_subfolders = ["image", "images", "audio", "video", "videos", "movie", "movies"]
     candidates = [
         _preview_audio_dir(client_session_id) / safe_name,
         _preview_ref_images_dir(client_session_id) / safe_name,
@@ -2501,6 +3080,9 @@ def _resolve_preview_media_source(filename: str, client_session_id: Optional[str
         COMFY_INPUT_DIR / safe_name,
         COMFY_OUTPUT_DIR / safe_name,
     ]
+    if normalized_subfolder:
+        for root_dir in [OUTPUT_DIR, COMFY_OUTPUT_DIR]:
+            candidates.append(root_dir / normalized_subfolder / safe_name)
     for subfolder in common_output_subfolders:
         candidates.append(OUTPUT_DIR / subfolder / safe_name)
         candidates.append(COMFY_OUTPUT_DIR / subfolder / safe_name)
@@ -2894,6 +3476,10 @@ def production_config():
             "title": "Music Video Studio",
             "subtitle": "プリセット起点で制作キャンバスとSTEP制作・編集エリアを行き来するMV制作UI",
             "version": "1.0.0",
+            "features": {
+                "aceStepAvailable": bool(ACE_STEP_URL),
+                "musicRepaintAvailable": bool(ACE_STEP_URL),
+            },
         },
         "presets": PRESET_CATALOG,
         "modes": [
@@ -3201,6 +3787,112 @@ async def trim_production_music(request: PreviewMusicTrimRequest):
     )
 
 
+@app.post("/api/v1/production/music/repaint", response_model=PreviewMusicGenerateResponse)
+async def repaint_production_music(request: PreviewMusicRepaintRequest):
+    started = time.time()
+    if not ACE_STEP_URL:
+        raise HTTPException(status_code=503, detail="ACE-Step API is required for repaint")
+
+    filename = str(request.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+
+    tags = str(request.tags or "").strip()
+    lyrics = _sanitize_preview_ace_step_lyrics(str(request.lyrics or "").strip())
+    language = str(request.language or "ja").strip() or "ja"
+    duration = max(10, min(int(request.duration or 30), 600))
+    bpm = None if request.bpm in (None, 0, "") else max(60, min(int(request.bpm), 220))
+    timesignature = str(request.timesignature or "4").strip() or "4"
+    keyscale = _normalize_music_key_signature(request.keyscale) or None
+    steps = max(4, min(int(request.steps or 8), 80))
+    cfg = max(0.1, min(float(request.cfg or 3.0), 20.0))
+    seed = request.seed if isinstance(request.seed, int) and request.seed > 0 else None
+
+    if not tags:
+        raise HTTPException(status_code=400, detail="tags are required")
+    if language != "inst" and not lyrics:
+        raise HTTPException(status_code=400, detail="lyrics are required unless instrumental mode is selected")
+
+    try:
+        source_path = _resolve_preview_media_source(filename, request.client_session_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Audio not found: {exc}") from exc
+
+    try:
+        source_duration_sec = max(0.0, _probe_preview_media_duration(source_path))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read audio duration: {exc}") from exc
+
+    repainting_start = max(0.0, float(request.repainting_start or 0.0))
+    repainting_end = float(request.repainting_end or 0.0)
+    if repainting_end <= 0:
+        repainting_end = source_duration_sec
+    repainting_end = max(0.0, min(source_duration_sec, repainting_end))
+    if repainting_end <= repainting_start:
+        raise HTTPException(status_code=400, detail="repainting_end must be greater than repainting_start")
+
+    print(
+        "[production] music-repaint request",
+        {
+            "client_session_id": _safe_session_id(request.client_session_id),
+            "filename": filename,
+            "source_duration_sec": round(source_duration_sec, 2),
+            "repainting_start": round(repainting_start, 2),
+            "repainting_end": round(repainting_end, 2),
+            "duration": duration,
+            "bpm": bpm,
+            "timesignature": timesignature,
+            "keyscale": keyscale,
+            "steps": steps,
+            "cfg": cfg,
+            "thinking": request.thinking,
+        },
+    )
+
+    try:
+        result = _generate_music_audio_via_ace_step_multipart(
+            task_type="repaint",
+            client_session_id=request.client_session_id,
+            source_path=source_path,
+            tags=tags,
+            lyrics=lyrics,
+            language=("ja" if language == "inst" else language),
+            duration=duration,
+            bpm=bpm,
+            timesignature=timesignature,
+            keyscale=keyscale,
+            steps=steps,
+            cfg=cfg,
+            seed=seed,
+            thinking=bool(request.thinking),
+            repainting_start=repainting_start,
+            repainting_end=repainting_end,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    original_filename = str(request.original_filename or source_path.name).strip() or source_path.name
+    source_label = str(request.source or "generated").strip().lower()
+    if source_label not in {"generated", "imported"}:
+        source_label = "generated"
+
+    return PreviewMusicGenerateResponse(
+        success=True,
+        filename=str(result.get("filename") or ""),
+        subfolder=str(result.get("subfolder") or ""),
+        type=str(result.get("type") or "output"),
+        media_type=str(result.get("media_type") or "audio"),
+        preview_url=f"/api/v1/production/media/{_safe_name(str(result.get('filename') or ''))}?client_session_id={_safe_session_id(request.client_session_id)}",
+        backend=str(result.get("backend") or "ace-step-api-repaint"),
+        source=source_label,
+        original_filename=original_filename,
+        duration_sec=max(0.0, float(result.get("duration_sec") or 0.0)),
+        elapsed_time=round(time.time() - started, 2),
+    )
+
+
 @app.get("/api/v1/production/media/{filename}")
 @app.get("/api/v1/startup-prototype/media/{filename}", include_in_schema=False)
 def get_production_media(
@@ -3225,6 +3917,22 @@ def get_production_media(
         if candidate.exists() and candidate.is_file():
             return FileResponse(candidate)
     raise HTTPException(status_code=404, detail=f"Media not found: {filename}")
+
+
+@app.get("/api/v1/production/mv-thumbnail/{filename}")
+def get_production_mv_thumbnail(
+    filename: str,
+    client_session_id: Optional[str] = None,
+    subfolder: Optional[str] = None,
+):
+    source_path = _resolve_preview_media_source(filename, client_session_id, subfolder)
+    if _classify_preview_media_type(source_path) != "video":
+        raise HTTPException(status_code=404, detail=f"Thumbnail source is not a video: {filename}")
+    try:
+        thumb_path = _ensure_mv_thumbnail(source_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not build thumbnail for {filename}: {exc}") from exc
+    return FileResponse(thumb_path, media_type="image/jpeg")
 
 
 @app.get("/api/v1/production/ref-images/file/{name}")
@@ -3639,6 +4347,7 @@ async def production_scene_prompt_generate(request: PreviewScenePromptGenerateRe
     arrangement_notes = str(request.arrangement_notes or "").strip()
     music_tags = str(request.music_tags or "").strip()
     character_context = str(request.character_context or "").strip()
+    visual_style = _normalize_preview_scene_visual_style(request.visual_style)
     pipeline_preset_id = str(request.pipeline_preset_id or "").strip()
     workflow_mode = str(request.workflow_mode or "").strip()
     scene_count = max(1, min(int(request.scene_count or 5), MAX_PREVIEW_SCENE_COUNT))
@@ -3648,14 +4357,14 @@ async def production_scene_prompt_generate(request: PreviewScenePromptGenerateRe
     if not any([scenario_text, world_notes, lyrics_text, arrangement_notes, character_context]):
         raise HTTPException(status_code=400, detail="scene prompt context is required")
 
-    durations, scene_count = await _generate_preview_scene_duration_plan_with_count(
+    durations = await _generate_preview_scene_duration_plan(
         scenario_text=scenario_text,
         lyrics_text=lyrics_text,
+        scene_prompt_texts=None,
         scene_count=scene_count,
         target_duration_sec=target_duration_sec,
         workflow_mode=workflow_mode,
         pipeline_preset_id=pipeline_preset_id,
-        propose_scene_count=True,
     )
     lyric_units = _extract_lyric_units(lyrics_text)
     transitions, transition_reasons = await _generate_preview_scene_transition_plan(
@@ -3670,7 +4379,7 @@ async def production_scene_prompt_generate(request: PreviewScenePromptGenerateRe
     )
 
     system_prompt = (
-        "You are an expert image prompt engineer for anime-style music video keyframes. "
+        "You are an expert image prompt engineer for music video keyframes. "
         "Create exactly N self-contained still-image prompts for scene image generation. "
         "Each prompt must work independently, so restate essential character and setting details every time. "
         "Prefer English prompt wording even if the source notes are Japanese. "
@@ -3682,6 +4391,8 @@ async def production_scene_prompt_generate(request: PreviewScenePromptGenerateRe
     lyric_lines = "\n".join([f"#{idx + 1}: {_pick_scene_lyric_excerpt(lyric_units, idx, scene_count) or '(none)'}" for idx in range(scene_count)])
     user_prompt = (
         f"OUTPUT_LANGUAGE: {language}\n"
+        f"VISUAL_STYLE: {visual_style}\n"
+        f"STYLE_HINT: {_preview_scene_visual_style_hint(visual_style)}\n"
         f"SCENE_COUNT: {scene_count}\n"
         f"TARGET_DURATION_SEC: {target_duration_sec}\n\n"
         f"SCENARIO_TEXT:\n{scenario_text or '(none)'}\n\n"
@@ -3730,6 +4441,7 @@ async def production_scene_prompt_generate(request: PreviewScenePromptGenerateRe
             arrangement_notes=arrangement_notes,
             music_tags=music_tags,
             character_context=character_context,
+            visual_style=visual_style,
             scene_count=scene_count,
             target_duration_sec=target_duration_sec,
             pipeline_preset_id=pipeline_preset_id,
@@ -3750,28 +4462,33 @@ async def production_scene_plan_generate(request: PreviewScenePlanGenerateReques
     lyrics_text = str(request.lyrics_text or "").strip()
     world_notes = str(request.world_notes or "").strip()
     arrangement_notes = str(request.arrangement_notes or "").strip()
+    scene_prompt_texts = [str(item or "").strip() for item in list(request.scene_prompt_texts or [])]
     scene_count = max(1, min(int(request.scene_count or 5), MAX_PREVIEW_SCENE_COUNT))
+    propose_scene_count = bool(request.propose_scene_count)
     target_duration_sec = max(10, min(int(request.target_duration_sec or 30), 600))
     pipeline_preset_id = str(request.pipeline_preset_id or "").strip()
     workflow_mode = str(request.workflow_mode or "").strip()
 
-    if not any([scenario_text, lyrics_text, world_notes, arrangement_notes]):
+    if not any([scenario_text, lyrics_text, world_notes, arrangement_notes, *scene_prompt_texts]):
         raise HTTPException(status_code=400, detail="scenario or lyrics context is required")
 
-    durations = await _generate_preview_scene_duration_plan(
+    durations, resolved_scene_count = await _generate_preview_scene_duration_plan_with_count(
         scenario_text=scenario_text,
         lyrics_text=lyrics_text,
+        scene_prompt_texts=scene_prompt_texts,
         scene_count=scene_count,
         target_duration_sec=target_duration_sec,
         workflow_mode=workflow_mode,
         pipeline_preset_id=pipeline_preset_id,
+        propose_scene_count=propose_scene_count,
     )
     transitions, transition_reasons = await _generate_preview_scene_transition_plan(
-        scene_count=scene_count,
+        scene_count=resolved_scene_count,
         scenario_text=scenario_text,
         lyrics_text=lyrics_text,
         world_notes=world_notes,
         arrangement_notes=arrangement_notes,
+        scene_prompt_texts=scene_prompt_texts,
         durations=durations,
         pipeline_preset_id=pipeline_preset_id,
         workflow_mode=workflow_mode,
@@ -3779,7 +4496,7 @@ async def production_scene_plan_generate(request: PreviewScenePlanGenerateReques
 
     return PreviewScenePlanGenerateResponse(
         success=True,
-        scene_count=scene_count,
+        scene_count=resolved_scene_count,
         scene_durations_sec=durations,
         scene_transitions=transitions,
         scene_transition_reasons=transition_reasons,
@@ -3795,7 +4512,9 @@ def production_scene_image_generate(request: PreviewSceneImageGenerateRequest):
     source_images = [str(item or "").strip() for item in request.input_images][:3]
     source_images = [item for item in source_images if item]
     raw_prompt = str(request.prompt or "").strip()
-    prompt = _wrap_qwen_2511_edit_instruction_prompt(raw_prompt) if source_images else raw_prompt
+    style_hint = _preview_scene_visual_style_hint(request.visual_style)
+    styled_prompt = f"{style_hint}, {raw_prompt}" if style_hint and raw_prompt else raw_prompt
+    prompt = _wrap_qwen_2511_edit_instruction_prompt(styled_prompt) if source_images else styled_prompt
     cfg = max(0.1, min(float(request.cfg or 1.0), 20.0))
     denoise = max(0.0, min(float(request.denoise if request.denoise is not None else 1.0), 1.0))
 
@@ -3872,7 +4591,9 @@ def production_scene_video_generate(request: PreviewSceneVideoGenerateRequest):
     started = time.time()
     _set_preview_cancel(request.client_session_id, "scene-video", False)
     scene_index = max(1, int(request.scene_index or 1))
-    prompt = str(request.prompt or "").strip()
+    raw_prompt = str(request.prompt or "").strip()
+    style_hint = _preview_scene_visual_style_hint(request.visual_style)
+    prompt = f"{style_hint}, {raw_prompt}" if style_hint and raw_prompt else raw_prompt
     image_filename = str(request.image_filename or "").strip()
     end_image_filename = str(request.end_image_filename or "").strip()
     duration_sec = max(1, min(int(request.duration_sec or 5), 15))
@@ -4052,6 +4773,155 @@ def production_final_mv_render(request: PreviewFinalMVRenderRequest):
         "final_video": final_payload,
         "audio_filename": audio_filename,
         "elapsed_time": round(time.time() - started, 2),
+    }
+
+
+@app.get("/api/v1/production/final-mv/list")
+def production_final_mv_list(client_session_id: Optional[str] = None, limit: int = 24, offset: int = 0):
+    payload = _list_generated_movie_items(client_session_id, limit=limit, offset=offset)
+    return {
+        "success": True,
+        **payload,
+    }
+
+
+@app.post("/api/v1/production/final-mv/library/upload")
+async def production_final_mv_library_upload(
+    client_session_id: Optional[str] = Form(None),
+    title: Optional[str] = Form(None),
+    memo: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    destination = _store_uploaded_mv_file(file)
+    destination.write_bytes(await file.read())
+    metadata = _register_mv_library_path(
+        destination,
+        title=title,
+        memo=memo,
+        source_type="uploaded",
+        original_filename=file.filename or destination.name,
+    )
+    return {
+        "success": True,
+        "item": _build_mv_library_item(destination, client_session_id, metadata),
+    }
+
+
+@app.post("/api/v1/production/final-mv/library/import-folder")
+def production_final_mv_library_import_folder(request: ProductionMVLibraryImportFolderRequest):
+    raw_path = str(request.folder_path or "").strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="folder_path is required")
+    folder_path = Path(raw_path).expanduser()
+    if not folder_path.exists() or not folder_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Folder not found: {folder_path}")
+
+    iterator = folder_path.rglob("*") if request.recursive else folder_path.glob("*")
+    candidates = [path for path in iterator if path.is_file() and _classify_preview_media_type(path) == "video"]
+    if not candidates:
+        return {
+            "success": True,
+            "items": [],
+            "imported_count": 0,
+            "skipped_count": 0,
+        }
+
+    library_index = _read_mv_library_index()
+    items: List[Dict[str, Any]] = []
+    imported_count = 0
+    skipped_count = 0
+    for source_path in sorted(candidates):
+        existing = _find_mv_library_entry_by_import_source(library_index, source_path)
+        existing_filename = _safe_name(str(existing.get("filename") or "")) if isinstance(existing, dict) else ""
+        if existing_filename:
+            try:
+                existing_path = _resolve_preview_media_source(existing_filename, None)
+            except Exception:
+                existing_path = None
+            if existing_path and existing_path.exists() and existing_path.is_file():
+                skipped_count += 1
+                items.append(_build_mv_library_item(existing_path, request.client_session_id, existing))
+                continue
+
+        destination = _copy_mv_file_to_library(source_path)
+        metadata = _register_mv_library_path(
+            destination,
+            title=_default_mv_library_title(source_path),
+            memo="",
+            source_type="imported",
+            original_filename=source_path.name,
+            imported_from=str(source_path.resolve()),
+        )
+        items.append(_build_mv_library_item(destination, request.client_session_id, metadata))
+        library_index = _read_mv_library_index()
+        imported_count += 1
+
+    return {
+        "success": True,
+        "items": items,
+        "imported_count": imported_count,
+        "skipped_count": skipped_count,
+    }
+
+
+@app.post("/api/v1/production/final-mv/library/metadata")
+def production_final_mv_library_metadata(request: ProductionMVLibraryMetadataRequest):
+    path = _resolve_preview_media_source(request.filename, request.client_session_id, request.subfolder)
+    if _classify_preview_media_type(path) != "video":
+        raise HTTPException(status_code=400, detail="Only video files can be managed in MV library")
+    metadata = _register_mv_library_path(
+        path,
+        title=request.title,
+        memo=request.memo,
+    )
+    return {
+        "success": True,
+        "item": _build_mv_library_item(path, request.client_session_id, metadata),
+    }
+
+
+@app.delete("/api/v1/production/final-mv/library/{filename}")
+def production_final_mv_library_delete(
+    filename: str,
+    client_session_id: Optional[str] = None,
+    subfolder: Optional[str] = None,
+):
+    path = _resolve_preview_media_source(filename, client_session_id, subfolder)
+    if _classify_preview_media_type(path) != "video":
+        raise HTTPException(status_code=400, detail="Only video files can be deleted from MV library")
+
+    allowed_roots = [OUTPUT_DIR / "movie", COMFY_OUTPUT_DIR / "movie"]
+    if not any(_is_path_within(path, root) for root in allowed_roots if root.exists()):
+        raise HTTPException(status_code=400, detail="MV library delete is limited to output/movie files")
+
+    actual_subfolder = _get_mv_library_subfolder(path)
+    metadata_index = _read_mv_library_index()
+    removed_metadata = False
+    for key in {
+        _mv_library_media_key(path.name, actual_subfolder),
+        _mv_library_media_key(path.name, subfolder),
+        _mv_library_media_key(path.name, None),
+    }:
+        if key and key in metadata_index:
+            metadata_index.pop(key, None)
+            removed_metadata = True
+    if removed_metadata:
+        _write_mv_library_index(metadata_index)
+
+    deleted_file = False
+    try:
+        if path.exists() and path.is_file():
+            path.unlink()
+            deleted_file = True
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete MV file: {type(exc).__name__}: {exc}") from exc
+
+    return {
+        "success": True,
+        "filename": path.name,
+        "subfolder": actual_subfolder,
+        "deleted_file": deleted_file,
+        "removed_metadata": removed_metadata,
     }
 
 

@@ -9,6 +9,8 @@ Language: 日本語 | [English](./README_EN.md)
 現在の既定UIは **Production 版 Music Video Studio** です。  
 旧 `Generative Media Place` / `Simple Video` 系UIは互換用として残しています。
 
+中断後に再開する場合は、[docs/HANDOFF_2026-05-03_JP.md](docs/HANDOFF_2026-05-03_JP.md) を先に確認してください。
+
 ---
 
 ## 概要
@@ -64,6 +66,10 @@ Language: 日本語 | [English](./README_EN.md)
   - シーンクリップ結合
   - 音楽合成
   - 結合から完成MVまでの自動制作ボタン
+  - 専用ページ `MV Library` での生成済みMV一覧表示
+  - UIからの過去MVアップロード登録
+  - 任意フォルダからのMVインポート
+  - タイトル / メモ付き管理
 - **状態保存**
   - localStorage とサーバー側 session state に保存
 
@@ -89,8 +95,11 @@ mv_studio/
 ├── start_production.sh               # Production版 起動スクリプト
 ├── static/
 │   ├── music_video_studio.html       # Production版 UI
+│   ├── mv_library.html               # 生成済みMV一覧の専用画面
 │   ├── js/music_video_studio.js      # Production版 フロントエンドロジック
+│   ├── js/mv_library.js              # MV Library ロジック
 │   └── css/music_video_studio.css    # Production版 スタイル
+├── lt/                               # 発表資料・図版一式（git 管理外）
 ├── workflows/                        # ComfyUI API workflow JSON
 ├── docs/                             # 技術メモ・利用ガイド・設計資料
 ├── data/                             # 状態保存・参照画像・セッションデータ（git 管理外）
@@ -107,6 +116,11 @@ start.sh
 static/index.html
 static/js/simple_video.js
 ```
+
+プレゼン資料:
+
+- 本番用の発表資料・図版・Mermaid ソースは [lt/README.md](lt/README.md) を参照してください
+- `lt/` はローカル作業用フォルダーとして `.gitignore` でフォルダーごと除外しています
 
 ---
 
@@ -240,6 +254,29 @@ bash start_production.sh --no-reload
 5. シーン動画作成で各シーンを動画化
 6. 完成MVでクリップ結合と音楽合成を実行
 
+### 生成済みMV一覧 / 過去MV管理
+
+完成MV STEP から、生成済みMV一覧の専用ページ `MV Library` を開けます。
+
+できること:
+
+- `output/movie` に保存された最近のMV一覧表示
+- 過去に作成したMVファイルをブラウザUIからアップロード登録
+- サーバー上の任意フォルダからMVを一括インポート
+- 各MVにタイトル / メモを付けて管理
+
+主な画面:
+
+- `GET /mv_library.html`
+- [static/mv_library.html](static/mv_library.html)
+- [static/js/mv_library.js](static/js/mv_library.js)
+
+補足:
+
+- 生成済みMV一覧は `MV Library` 専用画面で表示します
+- 完成MV STEP 側は一覧への導線と件数確認のみを持ちます
+- インポート / アップロードされたMVも `output/movie` 配下へ取り込みます
+
 ### キャラクタを使わない MV の作り方
 
 この UI は「キャラクタ作成」という名前ですが、実際には **景色・建物・小物・乗り物・抽象オブジェクト** などを主役にした MV にも使えます。
@@ -271,6 +308,7 @@ bash start_production.sh --no-reload
 |---|---|
 | `GET /` | Production UI |
 | `GET /music_video_studio.html` | Production UI |
+| `GET /mv_library.html` | 生成済みMV一覧の専用画面 |
 | `GET /api/v1/production/config` | プリセット・モード設定 |
 | `GET /api/v1/production/state` | 状態取得 |
 | `POST /api/v1/production/state` | 状態保存 |
@@ -284,6 +322,10 @@ bash start_production.sh --no-reload
 | `POST /api/v1/production/scene-image/generate` | シーン画像生成 |
 | `POST /api/v1/production/scene-video/generate` | シーン動画生成 |
 | `POST /api/v1/production/final-mv/render` | クリップ結合 / 音楽合成 |
+| `GET /api/v1/production/final-mv/list` | MV Library 用の一覧取得 |
+| `POST /api/v1/production/final-mv/library/upload` | UIからMVをアップロード登録 |
+| `POST /api/v1/production/final-mv/library/import-folder` | 任意フォルダからMVを一括インポート |
+| `POST /api/v1/production/final-mv/library/metadata` | タイトル / メモ保存 |
 | `POST /api/v1/production/character-image` | キャラクター画像生成 |
 | `POST /api/v1/production/character-image/fit-video` | 動画比率への画像フィット |
 | `POST /api/v1/production/character-sheet` | キャラシート生成 |
@@ -326,6 +368,7 @@ Production UI は以下に状態を保存します。
 | `data/production_state.json` | サーバー側共通状態 |
 | `data/production_sessions/` | セッション別状態 |
 | `data/ref_images/` | 参照画像 |
+| `data/mv_library.json` | MV Library のタイトル / メモ / 取込元メタデータ |
 
 `data/`, `input/`, `output/`, `temp/`, `llm/` は `.gitignore` で除外しています。
 

@@ -4,6 +4,14 @@
   const MAX_SCENE_COUNT = 40;
   const DEFAULT_SCENE_DURATION_MAX_SEC = 10;
   const LTX_SCENE_DURATION_MAX_SEC = 15;
+  const SCENE_VISUAL_STYLE_OPTIONS = [
+    { value: 'anime', label: 'アニメ' },
+    { value: 'realistic', label: '実写' },
+    { value: 'illustration', label: 'イラスト' },
+    { value: 'cinematic', label: '映画' },
+    { value: 'line_art', label: 'ラインアート' },
+    { value: 'pixel_art', label: 'ドット絵' },
+  ];
 
   const state = {
     config: null,
@@ -60,6 +68,7 @@
     sceneImageStep: {
       scenePrompts: [],
       selectedSceneIndex: 0,
+      visualStyle: 'anime',
       useStoryContext: true,
       useMusicContext: true,
       useCharacterContext: true,
@@ -101,11 +110,15 @@
   let musicPlanGenerationBusy = false;
   let musicAudioGenerationBusy = false;
   let musicAudioTrimBusy = false;
+  let musicAudioRepaintBusy = false;
   let scenePromptGenerationBusy = false;
   let scenePlanGenerationBusy = false;
   let sceneImageGenerationBusy = false;
   let sceneVideoGenerationBusy = false;
   let finalMvRenderBusy = false;
+  let mvLibraryUploadBusy = false;
+  let mvLibraryImportBusy = false;
+  let mvLibraryMetadataSaveBusyId = '';
   let sceneImageGenerationAbortController = null;
   let sceneVideoGenerationAbortController = null;
   let sceneImageBatchCancelRequested = false;
@@ -113,6 +126,17 @@
   const musicWaveformCache = new Map();
   let musicWaveformRenderToken = 0;
   let musicWaveformPlaybackRafId = 0;
+  const generatedMvGallery = {
+    items: [],
+    loading: false,
+    error: '',
+    loadedAt: 0,
+    totalCount: 0,
+    hasMore: false,
+    nextOffset: 0,
+    pageSize: 8,
+    loadingMode: '',
+  };
 
   function $(id) {
     return document.getElementById(id);
@@ -517,6 +541,7 @@
       state.sceneImageStep = {
         scenePrompts: [],
         selectedSceneIndex: 0,
+        visualStyle: 'anime',
         useStoryContext: true,
         useMusicContext: true,
         useCharacterContext: true,
@@ -539,6 +564,7 @@
       image: item?.image && typeof item.image === 'object' ? { ...item.image } : null,
     }));
     state.sceneImageStep.selectedSceneIndex = Math.max(0, Number(state.sceneImageStep.selectedSceneIndex || 0) || 0);
+    state.sceneImageStep.visualStyle = normalizeSceneVisualStyle(state.sceneImageStep.visualStyle);
 
     if (!state.sceneVideoStep || typeof state.sceneVideoStep !== 'object') {
       state.sceneVideoStep = {
@@ -737,6 +763,18 @@
     return window.confirm(getTextOnlyCharacterImageWarning(operationLabel));
   }
 
+  function getCharacterImageRefAsset(asset = state.characterStep.characterImage) {
+    const filename = String(asset?.sourceFilename || asset?.filename || '').trim();
+    if (!filename) {
+      return null;
+    }
+    return {
+      filename,
+      originalName: String(asset?.sourceOriginalName || asset?.originalName || asset?.filename || 'キャラ合成画像').trim(),
+      previewUrl: String(asset?.sourcePreviewUrl || asset?.previewUrl || '').trim(),
+    };
+  }
+
   function showCharacterImageReferenceDialog() {
     return new Promise((resolve) => {
       const overlay = document.createElement('div');
@@ -867,7 +905,7 @@
             ` : '<div></div>'}
           </div>
         </div>
-          <div>
+          <div class="preset-headline-side">
             ${selectedPipeline ? `<div class="pipeline-selected-note"><span>制作実行プラン</span><strong>${escapeHtml(selectedPipeline.label || '')}</strong></div>` : ''}
         </div>
       </div>
@@ -929,20 +967,12 @@
 
     const outputs = (step.outputs || []).length ? (step.outputs || []).join(' / ') : 'このSTEPで定義された出力をここに表示します';
     const handoff = step.handoff || '次STEPへの受け渡し情報をここに表示します';
-    const summaryPoints = (step.summary_points || []).length ? (step.summary_points || []).join(' / ') : (step.objective || 'このSTEPの目的を整理します');
-
     els.detailStepSummary.innerHTML = `
       <div class="detail-step-summary-card">
         <div class="detail-step-summary-head">
           <span class="step-chip">選択中STEPの概要</span>
-          <span class="flow-mini-badge">${escapeHtml(step.short || step.title || '')}</span>
         </div>
-        <p class="detail-step-summary-copy">${escapeHtml(step.objective || '')}</p>
         <ul class="detail-step-meta">
-          <li>
-            <strong>要点</strong>
-            <span>${escapeHtml(summaryPoints)}</span>
-          </li>
           <li>
             <strong>主な出力</strong>
             <span>${escapeHtml(outputs)}</span>
@@ -1209,7 +1239,15 @@
     state.storyStep.generatedOutline = [];
     state.storyStep.lastGeneratedAt = null;
     state.canvas.updatedAt = Date.now();
-    setStoryNotice('シナリオ・世界観をクリアしました', 'info');
+    setStoryNotice('シナリオ文をクリアしました', 'info');
+    renderDetail();
+    scheduleSave();
+  }
+
+  function clearStoryWorldNotes() {
+    state.storyStep.worldNotes = '';
+    state.canvas.updatedAt = Date.now();
+    setStoryNotice('世界観メモをクリアしました', 'info');
     renderDetail();
     scheduleSave();
   }
@@ -1582,6 +1620,16 @@
     state.musicStep.notice = message ? { message: String(message), tone: String(tone || 'info') } : null;
   }
 
+  function getMusicPlanPreserveWarning(parts = []) {
+    const labels = Array.isArray(parts)
+      ? parts.map((part) => String(part || '').trim()).filter(Boolean)
+      : [];
+    if (!labels.length) {
+      return '';
+    }
+    return `既存の${labels.join('・')}は変更しません。更新したい場合は「歌詞だけ再生成」「タグだけ再生成」を使ってください。`;
+  }
+
   function getMusicStoryContext() {
     const storyState = getStoryStepState();
     const parts = [];
@@ -1614,7 +1662,16 @@
     scheduleSave();
   }
 
-  async function generateMusicPlan() {
+  async function generateMusicPlan(options = {}) {
+    const {
+      updateLyrics = true,
+      updateTags = true,
+      updateArrangementNotes = true,
+      updateTitle = true,
+      updateBpm = true,
+      updateKeySignature = true,
+      successMessage = '歌詞・楽曲プランを生成しました',
+    } = options;
     const musicState = getMusicStepState();
     const storyState = getStoryStepState();
     const storyContext = musicState.useStoryContext ? getMusicStoryContext() : '';
@@ -1656,14 +1713,22 @@
         throw new Error(`HTTP ${response.status}: ${payload}`);
       }
       const result = await response.json();
-      state.musicStep.title = String(result?.title || state.musicStep.title || '').trim();
-      state.musicStep.lyricsText = String(result?.lyrics_text || state.musicStep.lyricsText || '').trim();
-      state.musicStep.tagsText = String(result?.music_tags || state.musicStep.tagsText || '').trim();
-      state.musicStep.arrangementNotes = String(result?.arrangement_notes || state.musicStep.arrangementNotes || '').trim();
-      if (result?.recommended_bpm) {
+      if (updateTitle) {
+        state.musicStep.title = String(result?.title || state.musicStep.title || '').trim();
+      }
+      if (updateLyrics) {
+        state.musicStep.lyricsText = String(result?.lyrics_text || state.musicStep.lyricsText || '').trim();
+      }
+      if (updateTags) {
+        state.musicStep.tagsText = String(result?.music_tags || state.musicStep.tagsText || '').trim();
+      }
+      if (updateArrangementNotes) {
+        state.musicStep.arrangementNotes = String(result?.arrangement_notes || state.musicStep.arrangementNotes || '').trim();
+      }
+      if (updateBpm && result?.recommended_bpm) {
         state.musicStep.bpm = Math.max(60, Math.min(220, Number(result.recommended_bpm) || state.musicStep.bpm || 118));
       }
-      if (result?.key_signature) {
+      if (updateKeySignature && result?.key_signature) {
         state.musicStep.keySignature = String(result.key_signature || '').trim();
       }
       if (!isImportedMusicAudio()) {
@@ -1672,7 +1737,7 @@
       invalidateFinalMvOutputs({ keepClip: true });
       state.musicStep.lastGeneratedAt = Date.now();
       state.canvas.updatedAt = Date.now();
-      setMusicNotice('歌詞・楽曲プランを生成しました', 'success');
+      setMusicNotice(successMessage, 'success');
       scheduleSave();
     } finally {
       musicPlanGenerationBusy = false;
@@ -1803,6 +1868,108 @@
       scheduleSave();
     } finally {
       musicAudioTrimBusy = false;
+      renderDetail();
+    }
+  }
+
+  async function repaintMusicAudio() {
+    const audio = state.musicStep.generatedAudio;
+    const musicState = getMusicStepState();
+    const tags = String(musicState.tagsText || '').trim();
+    const lyrics = String(musicState.lyricsText || '').trim();
+    const language = String(musicState.vocalLanguage || 'ja');
+    const aceStepAvailable = !!state.config?.app?.features?.musicRepaintAvailable;
+    if (!aceStepAvailable) {
+      setMusicNotice('ACE-Step API 接続時のみリペイントできます', 'warning');
+      renderDetail();
+      return;
+    }
+    if (!audio?.filename) {
+      setMusicNotice('先にリペイント対象の音声を用意してください', 'warning');
+      renderDetail();
+      return;
+    }
+    if (!tags) {
+      setMusicNotice('先に音楽タグ / 楽曲プロンプトを用意してください', 'warning');
+      renderDetail();
+      return;
+    }
+    if (language !== 'inst' && musicState.hasVocals && !lyrics) {
+      setMusicNotice('歌詞を含む設定のため、先に確定歌詞を用意してください', 'warning');
+      renderDetail();
+      return;
+    }
+    if (musicAudioRepaintBusy) {
+      return;
+    }
+
+    const repaintRange = getMusicAudioTrimRange();
+    if (repaintRange.keepDurationSec <= 0.05) {
+      setMusicNotice('リペイント区間が短すぎます。開始・終了位置を確認してください', 'warning');
+      renderDetail();
+      return;
+    }
+
+    musicAudioRepaintBusy = true;
+    setMusicNotice(`音声の ${repaintRange.startSec.toFixed(1)}〜${repaintRange.endSec.toFixed(1)} 秒をリペイント中です...`, 'info');
+    renderDetail();
+
+    try {
+      const response = await fetch('/api/v1/production/music/repaint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_session_id: getSessionId(),
+          filename: String(audio.filename || ''),
+          repainting_start: repaintRange.startSec,
+          repainting_end: repaintRange.endSec,
+          tags,
+          lyrics,
+          language,
+          duration: Math.max(10, Math.min(600, Math.round(Number(audio.durationSec || getEffectiveMusicDurationSec()) || getEffectiveMusicDurationSec()))),
+          bpm: Number(musicState.bpm) || null,
+          timesignature: '4',
+          keyscale: String(musicState.keySignature || ''),
+          steps: 8,
+          cfg: 3.0,
+          thinking: false,
+          source: String(audio.source || 'generated'),
+          original_filename: String(audio.originalName || audio.filename || ''),
+        }),
+      });
+      if (!response.ok) {
+        let payload = null;
+        try {
+          payload = await response.json();
+        } catch (_error) {
+          payload = null;
+        }
+        throw new Error(payload?.detail || `HTTP ${response.status}`);
+      }
+      const result = await response.json();
+      const durationSec = Math.max(0.1, Number(result?.duration_sec || audio.durationSec || getEffectiveMusicDurationSec()) || getEffectiveMusicDurationSec());
+      state.musicStep.generatedAudio = {
+        filename: String(result?.filename || ''),
+        originalName: String(result?.original_filename || audio.originalName || result?.filename || ''),
+        subfolder: String(result?.subfolder || ''),
+        type: String(result?.type || 'output'),
+        mediaType: String(result?.media_type || 'audio'),
+        previewUrl: String(result?.preview_url || ''),
+        backend: String(result?.backend || 'ace-step-api-repaint'),
+        source: String(result?.source || audio.source || 'generated'),
+        durationSec,
+        elapsedTime: Number(result?.elapsed_time || 0),
+        trimStartSec: 0,
+        trimEndSec: durationSec,
+      };
+      invalidateFinalMvOutputs({ keepClip: true });
+      state.musicStep.lastGeneratedAt = Date.now();
+      state.canvas.updatedAt = Date.now();
+      setMusicNotice(`音声の ${repaintRange.startSec.toFixed(1)}〜${repaintRange.endSec.toFixed(1)} 秒をリペイントしました`, 'success');
+      renderDetail();
+      scheduleSave();
+    } finally {
+      musicAudioRepaintBusy = false;
       renderDetail();
     }
   }
@@ -1940,14 +2107,38 @@
   async function runMusicStep() {
     const musicState = getMusicStepState();
     const actions = [];
+    const preserved = [];
     const language = String(musicState.vocalLanguage || 'ja');
     const hasTags = !!String(musicState.tagsText || '').trim();
     const hasLyrics = !!String(musicState.lyricsText || '').trim();
+    const needsLyrics = language !== 'inst' && musicState.hasVocals && !hasLyrics;
+    const needsTags = !hasTags;
 
-    if (!hasTags || (language !== 'inst' && musicState.hasVocals && !hasLyrics)) {
-      await generateMusicPlan();
-      if (String(state.musicStep.tagsText || '').trim() || String(state.musicStep.lyricsText || '').trim()) {
-        actions.push('歌詞・楽曲プラン作成');
+    if (hasLyrics && !needsLyrics) {
+      preserved.push('歌詞');
+    }
+    if (hasTags && !needsTags) {
+      preserved.push('タグ');
+    }
+
+    if (needsLyrics || needsTags) {
+      await generateMusicPlan({
+        updateLyrics: needsLyrics,
+        updateTags: needsTags,
+        updateArrangementNotes: false,
+        updateTitle: false,
+        updateBpm: false,
+        updateKeySignature: false,
+        successMessage: needsLyrics && needsTags
+          ? '不足していた歌詞・タグを生成しました'
+          : (needsLyrics ? '歌詞を生成しました' : 'タグを生成しました'),
+      });
+      if (needsLyrics && needsTags) {
+        actions.push('歌詞・タグ生成');
+      } else if (needsLyrics) {
+        actions.push('歌詞生成');
+      } else if (needsTags) {
+        actions.push('タグ生成');
       }
     }
 
@@ -1958,13 +2149,19 @@
       }
     }
 
+    const preserveWarning = getMusicPlanPreserveWarning(preserved);
     if (!actions.length) {
-      setMusicNotice('実行可能な未完了処理はありませんでした', 'info');
+      setMusicNotice(preserveWarning || '実行可能な未完了処理はありませんでした', preserveWarning ? 'warning' : 'info');
       renderDetail();
       return;
     }
 
-    setMusicNotice(`音楽STEPをまとめて実行しました（${actions.join(' → ')}）`, 'success');
+    setMusicNotice(
+      preserveWarning
+        ? `音楽STEPをまとめて実行しました（${actions.join(' → ')}）。${preserveWarning}`
+        : `音楽STEPをまとめて実行しました（${actions.join(' → ')}）`,
+      preserveWarning ? 'warning' : 'success',
+    );
     renderDetail();
   }
 
@@ -2034,6 +2231,107 @@
 
   function getSceneImageEffectiveDurationSec() {
     return Math.max(10, Number(getEffectiveMusicDurationSec()) || Number(state.storyStep.targetDurationSec) || 30);
+  }
+
+  function normalizeSceneVisualStyle(value) {
+    const normalized = String(value || 'anime').trim().toLowerCase();
+    return SCENE_VISUAL_STYLE_OPTIONS.some((option) => option.value === normalized) ? normalized : 'anime';
+  }
+
+  function getSceneVisualStyleLabel(value) {
+    const normalized = normalizeSceneVisualStyle(value);
+    return SCENE_VISUAL_STYLE_OPTIONS.find((option) => option.value === normalized)?.label || 'アニメ';
+  }
+
+  function getSceneVisualStylePromptHint(value) {
+    const normalized = normalizeSceneVisualStyle(value);
+    const mapping = {
+      anime: 'anime visual style, anime background, cel-shaded look',
+      realistic: 'photorealistic live-action style, realistic background, natural texture',
+      illustration: 'stylized illustration look, painterly background, graphic art texture',
+      cinematic: 'cinematic film look, movie lighting, grounded realistic production design',
+      line_art: 'clean line art style, crisp contour drawing, simplified shading',
+      pixel_art: 'pixel art style, retro game visuals, blocky low-resolution texture',
+    };
+    return mapping[normalized] || mapping.anime;
+  }
+
+  function getSceneCountAverageDurationSec(workflowMode = getSelectedSceneVideoWorkflowMode()) {
+    return isLtxSceneVideoWorkflowMode(workflowMode) ? 8 : 5;
+  }
+
+  function getRecommendedSceneCountForDuration(durationSec, workflowMode = getSelectedSceneVideoWorkflowMode()) {
+    const safeDurationSec = Math.max(10, Math.min(600, Number(durationSec) || getSceneImageEffectiveDurationSec() || 30));
+    const averageSceneSec = Math.max(1, Number(getSceneCountAverageDurationSec(workflowMode)) || 5);
+    const averageBasedCount = Math.max(1, Math.min(MAX_SCENE_COUNT, Math.round(safeDurationSec / averageSceneSec)));
+    const requiredMinimumCount = getRequiredSceneCountForDuration(safeDurationSec, workflowMode);
+    return Math.max(requiredMinimumCount, averageBasedCount);
+  }
+
+  function hasExistingScenePlanDraft() {
+    const prompts = getSceneImageDisplayPrompts();
+    const hasPromptDraft = prompts.some((item) => (
+      !!String(item?.prompt || '').trim()
+      || !!String(item?.lyricExcerpt || '').trim()
+      || !!item?.image?.filename
+      || !!item?.image?.previewUrl
+      || Number(item?.durationSec || 0) > 0
+    ));
+    const videos = Array.isArray(state.sceneVideoStep.sceneVideos) ? state.sceneVideoStep.sceneVideos : [];
+    const hasVideoDraft = videos.some((item) => (
+      !!item?.video?.filename
+      || !!item?.video?.previewUrl
+      || Number(item?.durationSec || 0) > 0
+    ));
+    return hasPromptDraft || hasVideoDraft;
+  }
+
+  function autoApplyRecommendedSceneCountFromMusicTransition({ workflowMode = getSelectedSceneVideoWorkflowMode(), rerender = true, save = true } = {}) {
+    const durationSec = getSceneImageEffectiveDurationSec();
+    const recommendedSceneCount = getRecommendedSceneCountForDuration(durationSec, workflowMode);
+    const currentSceneCount = getSceneImageTargetSceneCount();
+    if (recommendedSceneCount === currentSceneCount) {
+      return null;
+    }
+    updateStorySceneCount(recommendedSceneCount, { rerender, save });
+    return {
+      durationSec,
+      workflowMode,
+      averageSceneSec: getSceneCountAverageDurationSec(workflowMode),
+      recommendedSceneCount,
+    };
+  }
+
+  function getRequiredSceneCountForDuration(durationSec, workflowMode = getSelectedSceneVideoWorkflowMode()) {
+    const safeDurationSec = Math.max(10, Math.min(600, Number(durationSec) || getSceneImageEffectiveDurationSec() || 30));
+    const maxSceneSec = Math.max(1, Number(getSceneDurationProposalMaxSec(workflowMode)) || DEFAULT_SCENE_DURATION_MAX_SEC);
+    return Math.max(1, Math.min(MAX_SCENE_COUNT, Math.ceil(safeDurationSec / maxSceneSec)));
+  }
+
+  function getSceneCountDurationMismatch(workflowMode = getSelectedSceneVideoWorkflowMode()) {
+    const durationSec = getSceneImageEffectiveDurationSec();
+    const sceneCount = getSceneImageTargetSceneCount();
+    const maxSceneSec = Math.max(1, Number(getSceneDurationProposalMaxSec(workflowMode)) || DEFAULT_SCENE_DURATION_MAX_SEC);
+    const maxCoveredDurationSec = sceneCount * maxSceneSec;
+    if (maxCoveredDurationSec >= durationSec) {
+      return null;
+    }
+    return {
+      durationSec,
+      sceneCount,
+      maxSceneSec,
+      maxCoveredDurationSec,
+      requiredSceneCount: getRequiredSceneCountForDuration(durationSec, workflowMode),
+    };
+  }
+
+  function ensureSceneCountFitsDuration({ workflowMode = getSelectedSceneVideoWorkflowMode(), rerender = true, save = true } = {}) {
+    const mismatch = getSceneCountDurationMismatch(workflowMode);
+    if (!mismatch || mismatch.requiredSceneCount <= mismatch.sceneCount) {
+      return null;
+    }
+    updateStorySceneCount(mismatch.requiredSceneCount, { rerender, save });
+    return mismatch;
   }
 
   function getSceneImageDisplayPrompts() {
@@ -2143,11 +2441,12 @@
     const storyState = getStoryStepState();
     const musicState = getMusicStepState();
     const sceneCount = getSceneImageTargetSceneCount();
+    const scenePromptTexts = getSceneImageDisplayPrompts().slice(0, sceneCount).map((item) => String(item?.prompt || '').trim());
     const scenarioText = String(storyState.scenarioText || '').trim();
     const lyricsText = String(musicState.lyricsText || '').trim();
     const worldNotes = String(storyState.worldNotes || '').trim();
     const arrangementNotes = String(musicState.arrangementNotes || '').trim();
-    if (!scenarioText && !lyricsText && !worldNotes) {
+    if (!scenarioText && !lyricsText && !worldNotes && !scenePromptTexts.some(Boolean)) {
       setSceneImageNotice('先にシナリオまたは歌詞を用意してください', 'warning');
       renderDetail();
       return;
@@ -2169,6 +2468,7 @@
           lyrics_text: lyricsText,
           world_notes: worldNotes,
           arrangement_notes: arrangementNotes,
+          scene_prompt_texts: scenePromptTexts,
           scene_count: sceneCount,
           target_duration_sec: getSceneImageEffectiveDurationSec(),
           pipeline_preset_id: String(state.selectedPipelinePresetId || ''),
@@ -2180,13 +2480,9 @@
         throw new Error(`HTTP ${response.status}: ${payload}`);
       }
       const result = await response.json();
-      const suggestedSceneCount = Math.max(1, Math.min(MAX_SCENE_COUNT, Number(result?.scene_count) || sceneCount));
       const durations = Array.isArray(result?.scene_durations_sec) ? result.scene_durations_sec : [];
       const transitions = Array.isArray(result?.scene_transitions) ? result.scene_transitions : [];
       const transitionReasons = Array.isArray(result?.scene_transition_reasons) ? result.scene_transition_reasons : [];
-      if (suggestedSceneCount !== sceneCount) {
-        updateStorySceneCount(suggestedSceneCount, { rerender: false, save: false });
-      }
       const prompts = getSceneImageDisplayPrompts();
       for (let index = 0; index < prompts.length; index += 1) {
         if (durations[index] != null) {
@@ -2207,7 +2503,7 @@
       syncSceneVideoItems(items);
       invalidateFinalMvOutputs();
       state.canvas.updatedAt = Date.now();
-      setSceneImageNotice(suggestedSceneCount !== sceneCount ? `シーン数を ${suggestedSceneCount} に調整し、尺と遷移の提案を反映しました` : 'シーン尺と遷移の提案を反映しました', 'success');
+      setSceneImageNotice('シーン尺と遷移の提案を反映しました', 'success');
       renderDetail();
       scheduleSave();
     } finally {
@@ -2263,6 +2559,7 @@
           arrangement_notes: arrangementNotes,
           music_tags: musicTags,
           character_context: characterContext,
+          visual_style: normalizeSceneVisualStyle(sceneState.visualStyle),
           scene_count: sceneCount,
           target_duration_sec: getSceneImageEffectiveDurationSec(),
           pipeline_preset_id: String(state.selectedPipelinePresetId || ''),
@@ -2398,6 +2695,333 @@
     return state.finalMvStep;
   }
 
+  function normalizeGeneratedMvGalleryItem(item) {
+    if (!item || typeof item !== 'object') return null;
+    const rawDuration = Number(item.durationSec ?? item.duration_sec ?? 0);
+    return {
+      id: String(item.id || ''),
+      filename: String(item.filename || ''),
+      subfolder: String(item.subfolder || ''),
+      type: String(item.type || 'output'),
+      mediaType: String(item.mediaType || item.media_type || 'video'),
+      previewUrl: String(item.previewUrl || item.preview_url || ''),
+      thumbnailUrl: String(item.thumbnailUrl || item.thumbnail_url || ''),
+      kind: String(item.kind || 'movie'),
+      title: String(item.title || ''),
+      memo: String(item.memo || ''),
+      sourceType: String(item.sourceType || item.source_type || 'generated'),
+      originalFilename: String(item.originalFilename || item.original_filename || item.filename || ''),
+      importedFrom: String(item.importedFrom || item.imported_from || ''),
+      registeredAt: normalizeTimestamp(item.registeredAt || item.registered_at),
+      updatedAt: normalizeTimestamp(item.updatedAt || item.updated_at),
+      sizeBytes: Math.max(0, Number(item.sizeBytes || item.size_bytes || 0) || 0),
+      durationSec: Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null,
+    };
+  }
+
+  function mergeGeneratedMvGalleryItems(existingItems, incomingItems) {
+    const merged = [];
+    const seen = new Set();
+    [...(existingItems || []), ...(incomingItems || [])].forEach((item) => {
+      const key = `${item?.subfolder || ''}/${item?.filename || ''}`;
+      if (!item || !item.filename || seen.has(key)) return;
+      seen.add(key);
+      merged.push(item);
+    });
+    return merged;
+  }
+
+  function formatFileSize(bytes) {
+    const value = Math.max(0, Number(bytes || 0) || 0);
+    if (!value) return 'サイズ不明';
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+    if (value < 1024 ** 3) return `${(value / (1024 ** 2)).toFixed(1)} MB`;
+    return `${(value / (1024 ** 3)).toFixed(2)} GB`;
+  }
+
+  function formatDurationText(seconds) {
+    const value = Math.max(0, Number(seconds || 0) || 0);
+    if (!value) return '尺不明';
+    if (value < 60) return `${value.toFixed(value >= 10 ? 0 : 1)}秒`;
+    const minutes = Math.floor(value / 60);
+    const remain = Math.round(value % 60);
+    return `${minutes}分${String(remain).padStart(2, '0')}秒`;
+  }
+
+  function getGeneratedMvKindLabel(kind) {
+    const normalized = String(kind || 'movie').trim().toLowerCase();
+    if (normalized === 'final') return '完成MV';
+    if (normalized === 'clip') return '中間クリップ';
+    if (normalized === 'uploaded') return 'アップロード';
+    if (normalized === 'imported') return 'フォルダ取込';
+    return '出力動画';
+  }
+
+  function getGeneratedMvSourceLabel(sourceType) {
+    const normalized = String(sourceType || 'generated').trim().toLowerCase();
+    if (normalized === 'uploaded') return 'UIアップロード';
+    if (normalized === 'imported') return 'フォルダ取込';
+    return '生成出力';
+  }
+
+  function getGeneratedMvDefaultTitle(filename = '') {
+    const raw = String(filename || '').trim();
+    if (!raw) return 'MV';
+    return raw.replace(/\.[^.]+$/, '').replace(/_/g, ' ').trim() || raw;
+  }
+
+  async function uploadGeneratedMvLibraryFile(file, { title = '', memo = '' } = {}) {
+    if (!file) throw new Error('登録する動画ファイルを選択してください');
+    if (mvLibraryUploadBusy) return;
+    mvLibraryUploadBusy = true;
+    setFinalMvNotice('MVファイルをアップロード登録中です...', 'info');
+    if (String(getCurrentStep()?.id || '') === 'final_mv') renderDetail();
+    try {
+      const formData = new FormData();
+      formData.append('client_session_id', getSessionId());
+      formData.append('title', String(title || '').trim());
+      formData.append('memo', String(memo || '').trim());
+      formData.append('file', file);
+      const response = await fetch('/api/v1/production/final-mv/library/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        const payload = await response.text();
+        throw new Error(`HTTP ${response.status}: ${payload}`);
+      }
+      await refreshGeneratedMvGallery({ rerender: false });
+      setFinalMvNotice('MVファイルを登録しました', 'success');
+      renderDetail();
+    } finally {
+      mvLibraryUploadBusy = false;
+      if (String(getCurrentStep()?.id || '') === 'final_mv') renderDetail();
+    }
+  }
+
+  async function importGeneratedMvLibraryFolder(folderPath, { recursive = true } = {}) {
+    const normalizedPath = String(folderPath || '').trim();
+    if (!normalizedPath) throw new Error('インポート元フォルダを入力してください');
+    if (mvLibraryImportBusy) return;
+    mvLibraryImportBusy = true;
+    setFinalMvNotice('フォルダ内のMVをインポート中です...', 'info');
+    if (String(getCurrentStep()?.id || '') === 'final_mv') renderDetail();
+    try {
+      const response = await fetch('/api/v1/production/final-mv/library/import-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_session_id: getSessionId(),
+          folder_path: normalizedPath,
+          recursive: !!recursive,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.text();
+        throw new Error(`HTTP ${response.status}: ${payload}`);
+      }
+      const result = await response.json();
+      await refreshGeneratedMvGallery({ rerender: false });
+      setFinalMvNotice(`フォルダ取込を完了しました（追加 ${Number(result?.imported_count || 0)} / 既存 ${Number(result?.skipped_count || 0)}）`, 'success');
+      renderDetail();
+    } finally {
+      mvLibraryImportBusy = false;
+      if (String(getCurrentStep()?.id || '') === 'final_mv') renderDetail();
+    }
+  }
+
+  async function saveGeneratedMvLibraryMetadata({ filename, subfolder = '', title = '', memo = '' }) {
+    const safeFilename = String(filename || '').trim();
+    if (!safeFilename) throw new Error('保存対象のMVが見つかりません');
+    const saveId = `${subfolder}/${safeFilename}`.replace(/^\//, '');
+    if (mvLibraryMetadataSaveBusyId === saveId) return;
+    mvLibraryMetadataSaveBusyId = saveId;
+    if (String(getCurrentStep()?.id || '') === 'final_mv') renderDetail();
+    try {
+      const response = await fetch('/api/v1/production/final-mv/library/metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_session_id: getSessionId(),
+          filename: safeFilename,
+          subfolder: String(subfolder || '').trim(),
+          title: String(title || '').trim(),
+          memo: String(memo || '').trim(),
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.text();
+        throw new Error(`HTTP ${response.status}: ${payload}`);
+      }
+      await refreshGeneratedMvGallery({ rerender: false });
+      setFinalMvNotice('タイトルとメモを保存しました', 'success');
+      renderDetail();
+    } finally {
+      mvLibraryMetadataSaveBusyId = '';
+      if (String(getCurrentStep()?.id || '') === 'final_mv') renderDetail();
+    }
+  }
+
+  function renderGeneratedMvLibraryManager() {
+    return `
+      <div class="mv-library-manage-grid">
+        <section class="mv-library-manage-card">
+          <h4>UIから動画を登録</h4>
+          <p class="field-help">手元のMVファイルをアップロードして output/movie に登録します。</p>
+          <label class="preset-select-group">
+            <span class="field-label">動画ファイル</span>
+            <input id="mvLibraryUploadInput" class="text-input" type="file" accept="video/*,.mp4,.mov,.webm,.mkv,.avi" ${mvLibraryUploadBusy ? 'disabled' : ''} />
+          </label>
+          <label class="preset-select-group">
+            <span class="field-label">タイトル</span>
+            <input id="mvLibraryUploadTitleInput" class="text-input" type="text" placeholder="例: 2025 夏ライブ MV" ${mvLibraryUploadBusy ? 'disabled' : ''} />
+          </label>
+          <label class="preset-select-group">
+            <span class="field-label">メモ</span>
+            <textarea id="mvLibraryUploadMemoInput" class="prompt-textarea generated-mv-note-input" rows="3" placeholder="補足メモや管理メモ" ${mvLibraryUploadBusy ? 'disabled' : ''}></textarea>
+          </label>
+          <div class="generated-mv-links">
+            <button id="mvLibraryUploadBtn" class="detail-action-btn primary" type="button" ${mvLibraryUploadBusy ? 'disabled' : ''}>${mvLibraryUploadBusy ? '⏳ 登録中...' : '⬆️ アップロード登録'}</button>
+          </div>
+        </section>
+
+        <section class="mv-library-manage-card">
+          <h4>任意フォルダからインポート</h4>
+          <p class="field-help">サーバー上のフォルダを指定し、中の動画をまとめて output/movie に取り込みます。</p>
+          <label class="preset-select-group">
+            <span class="field-label">フォルダパス</span>
+            <input id="mvLibraryImportPathInput" class="text-input" type="text" placeholder="例: /home/user/archive/mv" ${mvLibraryImportBusy ? 'disabled' : ''} />
+          </label>
+          <label class="character-inline-option">
+            <input id="mvLibraryImportRecursiveInput" type="checkbox" checked ${mvLibraryImportBusy ? 'disabled' : ''} />
+            <span>サブフォルダも再帰的に検索</span>
+          </label>
+          <div class="generated-mv-links">
+            <button id="mvLibraryImportBtn" class="detail-action-btn secondary" type="button" ${mvLibraryImportBusy ? 'disabled' : ''}>${mvLibraryImportBusy ? '⏳ 取込中...' : '📁 フォルダをインポート'}</button>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  async function refreshGeneratedMvGallery({ rerender = true, append = false } = {}) {
+    if (generatedMvGallery.loading) return;
+    const offset = append ? generatedMvGallery.nextOffset : 0;
+    generatedMvGallery.loading = true;
+    generatedMvGallery.loadingMode = append ? 'append' : 'refresh';
+    if (!append) {
+      generatedMvGallery.error = '';
+    }
+    if (rerender && String(getCurrentStep()?.id || '') === 'final_mv') {
+      renderDetail();
+    }
+    try {
+      const response = await fetch(`/api/v1/production/final-mv/list?client_session_id=${encodeURIComponent(getSessionId())}&limit=${encodeURIComponent(generatedMvGallery.pageSize)}&offset=${encodeURIComponent(offset)}`, {
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const incomingItems = Array.isArray(data?.items)
+        ? data.items.map((item) => normalizeGeneratedMvGalleryItem(item)).filter(Boolean)
+        : [];
+      generatedMvGallery.items = append
+        ? mergeGeneratedMvGalleryItems(generatedMvGallery.items, incomingItems)
+        : incomingItems;
+      generatedMvGallery.loadedAt = Date.now();
+      generatedMvGallery.totalCount = Math.max(generatedMvGallery.items.length, Number(data?.total_count || 0) || 0);
+      generatedMvGallery.hasMore = !!data?.has_more;
+      generatedMvGallery.nextOffset = Math.max(generatedMvGallery.items.length, Number(data?.next_offset || 0) || 0);
+    } catch (error) {
+      generatedMvGallery.error = error?.message || '生成済みMV一覧の取得に失敗しました';
+    } finally {
+      generatedMvGallery.loading = false;
+      generatedMvGallery.loadingMode = '';
+      if (rerender && String(getCurrentStep()?.id || '') === 'final_mv') {
+        renderDetail();
+      }
+    }
+  }
+
+  function requestGeneratedMvGalleryRefresh({ force = false } = {}) {
+    const isStale = !generatedMvGallery.loadedAt || (Date.now() - generatedMvGallery.loadedAt) > 20000;
+    if (!force && (!isStale || generatedMvGallery.loading)) {
+      return;
+    }
+    void refreshGeneratedMvGallery({ rerender: true });
+  }
+
+  function renderGeneratedMvGallery() {
+    const toolbarLabel = generatedMvGallery.loadedAt
+      ? `最終取得: ${formatDateTime(generatedMvGallery.loadedAt)} ・ ${generatedMvGallery.items.length}/${generatedMvGallery.totalCount || generatedMvGallery.items.length}件表示中`
+      : 'output/movie の最近の出力を表示します';
+
+    if (generatedMvGallery.loading && !generatedMvGallery.items.length) {
+      return `
+        <div class="generated-mv-toolbar">
+          <div class="field-help">${escapeHtml(toolbarLabel)}</div>
+          <button id="generatedMvRefreshBtn" class="detail-action-btn secondary compact" type="button" disabled>読み込み中...</button>
+        </div>
+        <div class="character-output-placeholder">生成済みMV一覧を読み込んでいます...</div>
+      `;
+    }
+
+    if (!generatedMvGallery.items.length) {
+      return `
+        <div class="generated-mv-toolbar">
+          <div class="field-help">${escapeHtml(generatedMvGallery.error || toolbarLabel)}</div>
+          <button id="generatedMvRefreshBtn" class="detail-action-btn secondary compact" type="button" ${generatedMvGallery.loading ? 'disabled' : ''}>一覧を更新</button>
+        </div>
+        <div class="character-output-placeholder">まだ保存済みMVは見つかっていません</div>
+      `;
+    }
+
+    const cards = generatedMvGallery.items.map((item) => {
+      const saveId = `${item.subfolder || ''}/${item.filename || ''}`.replace(/^\//, '');
+      const saveBusy = mvLibraryMetadataSaveBusyId === saveId;
+      return `
+      <article class="generated-mv-card" data-mv-library-card data-mv-filename="${escapeHtml(item.filename || '')}" data-mv-subfolder="${escapeHtml(item.subfolder || '')}">
+        <div class="generated-mv-card-head">
+          <span class="generated-mv-badge ${escapeHtml(item.kind || 'movie')}">${escapeHtml(getGeneratedMvKindLabel(item.kind))}</span>
+          <span class="generated-mv-card-time">${escapeHtml(getGeneratedMvSourceLabel(item.sourceType))}</span>
+        </div>
+        ${item.previewUrl
+          ? `<video controls playsinline preload="none" poster="${escapeHtml(item.thumbnailUrl || '')}" class="scene-video-player final-mv-player generated-mv-player" src="${escapeHtml(item.previewUrl)}"></video>`
+          : '<div class="character-output-placeholder">プレビューを表示できません</div>'}
+        <div class="generated-mv-card-body">
+          <div class="generated-mv-filename" title="${escapeHtml(item.filename || '')}">${escapeHtml(item.filename || 'movie.mp4')}</div>
+          <label class="generated-mv-field">
+            <span class="field-label">タイトル</span>
+            <input class="text-input generated-mv-title-input" data-mv-title-input type="text" value="${escapeHtml(item.title || getGeneratedMvDefaultTitle(item.filename))}" ${saveBusy ? 'disabled' : ''} />
+          </label>
+          <label class="generated-mv-field">
+            <span class="field-label">メモ</span>
+            <textarea class="prompt-textarea generated-mv-note-input" data-mv-memo-input rows="1" ${saveBusy ? 'disabled' : ''}>${escapeHtml(item.memo || '')}</textarea>
+          </label>
+          <div class="generated-mv-meta">${escapeHtml(`${formatDurationText(item.durationSec)} ・ ${formatFileSize(item.sizeBytes)} ・ 更新 ${formatDateTime(item.updatedAt)}`)}</div>
+          <div class="generated-mv-meta">${escapeHtml(`元ファイル: ${item.originalFilename || item.filename || '不明'}`)}</div>
+          ${item.importedFrom ? `<div class="generated-mv-meta">${escapeHtml(`取込元: ${item.importedFrom}`)}</div>` : ''}
+          <div class="generated-mv-links">
+            ${item.previewUrl ? `<a class="detail-action-btn secondary compact" href="${escapeHtml(item.previewUrl)}" target="_blank" rel="noreferrer">開く</a>` : ''}
+            <button class="detail-action-btn secondary compact" type="button" data-mv-library-save ${saveBusy ? 'disabled' : ''}>${saveBusy ? '保存中...' : 'タイトル/メモ保存'}</button>
+          </div>
+        </div>
+      </article>
+    `;
+    }).join('');
+
+    return `
+      <div class="generated-mv-toolbar">
+        <div class="field-help">${escapeHtml(generatedMvGallery.error || toolbarLabel)}</div>
+        <div class="generated-mv-links">
+          <button id="generatedMvRefreshBtn" class="detail-action-btn secondary compact" type="button" ${generatedMvGallery.loading ? 'disabled' : ''}>${generatedMvGallery.loadingMode === 'refresh' ? '更新中...' : '一覧を更新'}</button>
+          ${generatedMvGallery.hasMore ? `<button id="generatedMvLoadMoreBtn" class="detail-action-btn secondary compact" type="button" ${generatedMvGallery.loading ? 'disabled' : ''}>${generatedMvGallery.loadingMode === 'append' ? '続きを読込中...' : '次を表示'}</button>` : ''}
+        </div>
+      </div>
+      <div class="generated-mv-grid">${cards}</div>
+    `;
+  }
+
   function setFinalMvNotice(message, tone = 'info') {
     state.finalMvStep.notice = message ? { message: String(message), tone: String(tone || 'info') } : null;
   }
@@ -2464,6 +3088,7 @@
   function buildDefaultSceneVideoPrompt(sceneItem) {
     const item = sceneItem || {};
     const parts = [];
+    parts.push(getSceneVisualStylePromptHint(state.sceneImageStep.visualStyle));
     if (state.sceneVideoStep.useScenePrompt && String(item.prompt || '').trim()) {
       parts.push(String(item.prompt || '').trim());
     }
@@ -2605,6 +3230,7 @@
         client_session_id: getSessionId(),
         scene_index: selected.sceneIndex,
         prompt: String(selected.prompt || '').trim(),
+        visual_style: normalizeSceneVisualStyle(state.sceneImageStep.visualStyle),
         image_filename: String(selected.image.filename || '').trim(),
         end_image_filename: getSceneVideoEndImageFilename(index),
         duration_sec: Math.max(1, Number(selected.durationSec || 5) || 5),
@@ -2656,6 +3282,7 @@
       client_session_id: getSessionId(),
       scene_index: selected.sceneIndex,
       prompt: String(selected.prompt || '').trim(),
+      visual_style: normalizeSceneVisualStyle(state.sceneImageStep.visualStyle),
       image_filename: String(selected.image.filename || '').trim(),
       end_image_filename: getSceneVideoEndImageFilename(safeIndex),
       duration_sec: Math.max(1, Number(selected.durationSec || 5) || 5),
@@ -2863,6 +3490,7 @@
       state.finalMvStep.lastRenderedAt = Date.now();
       state.canvas.updatedAt = Date.now();
       setFinalMvNotice('シーンクリップを結合しました', 'success');
+      await refreshGeneratedMvGallery({ rerender: false });
       renderDetail();
       scheduleSave();
     } finally {
@@ -2915,6 +3543,7 @@
       state.finalMvStep.lastRenderedAt = Date.now();
       state.canvas.updatedAt = Date.now();
       setFinalMvNotice('完成MVを生成しました', 'success');
+      await refreshGeneratedMvGallery({ rerender: false });
       renderDetail();
       scheduleSave();
     } finally {
@@ -2989,6 +3618,7 @@
       state.finalMvStep.lastRenderedAt = Date.now();
       state.canvas.updatedAt = Date.now();
       setFinalMvNotice('完成MV STEP をまとめて実行しました', 'success');
+      await refreshGeneratedMvGallery({ rerender: false });
       renderDetail();
       scheduleSave();
     } finally {
@@ -3040,6 +3670,7 @@
         client_session_id: getSessionId(),
         scene_index: selected.sceneIndex,
         prompt,
+        visual_style: normalizeSceneVisualStyle(sceneState.visualStyle),
         input_images: getSceneImageReferenceFilenames(),
         cfg: Number(sceneState.cfg) || 1.0,
         denoise: Number(sceneState.denoise) || 1.0,
@@ -3088,6 +3719,7 @@
       client_session_id: getSessionId(),
       scene_index: selected.sceneIndex,
       prompt,
+      visual_style: normalizeSceneVisualStyle(sceneState.visualStyle),
       input_images: getSceneImageReferenceFilenames(),
       cfg: Number(sceneState.cfg) || 1.0,
       denoise: Number(sceneState.denoise) || 1.0,
@@ -3363,7 +3995,6 @@
                 <div class="canvas-label">STEPの役割</div>
                 <h3>${escapeHtml(step.title)}</h3>
               </div>
-              <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
             <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
@@ -3415,6 +4046,7 @@
             <textarea id="storyWorldNotesInput" data-story-field="worldNotes" class="prompt-textarea" rows="5" placeholder="例: ネオン街、雨上がり、青紫の逆光、サビで夜明けへ移行...">${escapeHtml(storyState.worldNotes || '')}</textarea>
             <div class="character-ref-options">
               <button id="storyWorldNotesTranslateBtn" data-story-translate="worldNotes" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
+              ${storyState.worldNotes ? '<button id="storyWorldNotesClearBtn" class="detail-action-btn secondary" type="button">世界観メモをクリア</button>' : ''}
             </div>
           </section>
         </div>
@@ -3426,7 +4058,7 @@
             <textarea id="storyScenarioText" data-story-field="scenarioText" class="prompt-textarea story-scenario-textarea" rows="10" placeholder="シナリオ作成を実行すると、ここに展開結果が入ります。">${escapeHtml(storyState.scenarioText || '')}</textarea>
             <div class="character-ref-options">
               <button id="storyScenarioTranslateBtn" data-story-translate="scenarioText" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
-              ${storyState.scenarioText ? '<button id="storyScenarioClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
+              ${storyState.scenarioText ? '<button id="storyScenarioClearBtn" class="detail-action-btn secondary" type="button">シナリオ文をクリア</button>' : ''}
             </div>
           </section>
 
@@ -3468,11 +4100,11 @@
     const effectiveDurationSec = getEffectiveMusicDurationSec();
     const durationInherited = !hasMusicDurationOverride();
     const generatedAudio = musicState.generatedAudio;
+    const aceStepAvailable = !!state.config?.app?.features?.musicRepaintAvailable;
     const audioSourceBaseLabel = generatedAudio?.source === 'imported' ? '外部音楽' : '生成音楽';
     const audioSourceLabel = String(generatedAudio?.backend || '').includes('trim') ? `${audioSourceBaseLabel} / トリミング済み` : audioSourceBaseLabel;
     const audioDurationLabel = generatedAudio?.durationSec ? `${Math.round(Number(generatedAudio.durationSec) || 0)}秒` : '';
     const trimRange = getMusicAudioTrimRange();
-
     return `
       <div class="detail-layout">
         <div class="detail-grid">
@@ -3482,13 +4114,12 @@
                 <div class="canvas-label">STEPの役割</div>
                 <h3>${escapeHtml(step.title)}</h3>
               </div>
-              <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
             <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="story-meta-grid">
               <label class="preset-select-group">
-                <span class="field-label">制作尺（秒）</span>
+                <span class="field-label">MV制作尺（秒）</span>
                 <input id="musicTargetDurationInput" class="text-input" type="number" min="10" max="600" step="5" value="${escapeHtml(storyState.targetDurationSec || 30)}" />
               </label>
               <label class="preset-select-group">
@@ -3504,8 +4135,8 @@
                 <input id="musicBpmInput" class="text-input" type="number" min="60" max="220" step="1" value="${escapeHtml(musicState.bpm || 118)}" />
               </label>
               <label class="preset-select-group">
-                <span class="field-label">音楽尺上書き（秒）</span>
-                <input id="musicDurationOverrideInput" class="text-input" type="number" min="10" max="600" step="5" value="${musicState.durationOverrideSec ? escapeHtml(musicState.durationOverrideSec) : ''}" placeholder="未入力なら前段を継承" />
+                <span class="field-label">音楽尺（秒）</span>
+                <input id="musicDurationOverrideInput" class="text-input" type="number" min="10" max="600" step="5" value="${musicState.durationOverrideSec ? escapeHtml(musicState.durationOverrideSec) : ''}" placeholder="未入力ならMV制作尺を継承" />
               </label>
               <label class="preset-select-group">
                 <span class="field-label">キー</span>
@@ -3543,15 +4174,18 @@
             <h3>${escapeHtml(isLyricsFocused ? '曲の方向性・歌詞フック' : '曲の方向性メモ')}</h3>
             <p class="field-help">シナリオから受け取った感情曲線を、曲調・声質・展開・サビの見せ場に変換するためのメモです。</p>
             <textarea id="musicPromptInput" data-music-field="musicPrompt" class="prompt-textarea" rows="6" placeholder="例: Aメロは静かに、サビで解放感。雨の夜から夜明けへ抜けるようなシティポップ感。">${escapeHtml(musicState.musicPrompt || '')}</textarea>
+            <div class="character-ref-options music-prompt-helper-row">
+              <button id="musicUseStoryContextBtn" class="detail-action-btn secondary" type="button" ${storyContext ? '' : 'disabled'}>シナリオ内容を反映</button>
+              <button id="musicPromptTranslateBtn" data-music-translate="musicPrompt" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
+            </div>
             <div class="character-ref-options">
               <button id="musicStepRunBtn" class="detail-action-btn primary" type="button" ${(musicPlanGenerationBusy || musicAudioGenerationBusy) ? 'disabled' : ''}>${(musicPlanGenerationBusy || musicAudioGenerationBusy) ? '⏳ 実行中...' : '🎼 このSTEPをまとめて実行'}</button>
               <button id="musicGenerateBtn" class="detail-action-btn secondary" type="button" ${musicPlanGenerationBusy ? 'disabled' : ''}>${musicPlanGenerationBusy ? '⏳ 生成中...' : '🧠 歌詞・楽曲プラン作成'}</button>
               <button id="musicProduceBtn" class="detail-action-btn secondary" type="button" ${musicAudioGenerationBusy ? 'disabled' : ''}>${musicAudioGenerationBusy ? '⏳ 音楽生成中...' : '🎵 音楽制作'}</button>
               <button id="musicImportAudioBtn" class="detail-action-btn secondary" type="button">📥 外部音楽を読み込む</button>
-              <button id="musicPromptTranslateBtn" data-music-translate="musicPrompt" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
-              <button id="musicUseStoryContextBtn" class="detail-action-btn secondary" type="button" ${storyContext ? '' : 'disabled'}>シナリオ内容を反映</button>
               <input id="musicImportAudioInput" type="file" accept="audio/*" hidden />
             </div>
+            ${notice?.tone === 'warning' ? `<div class="character-inline-notice warning music-action-notice">${escapeHtml(notice.message || '')}</div>` : ''}
             <div class="character-ref-options">
               <label class="character-inline-option">
                 <input id="musicAutoSuggestScenePlanOnImport" type="checkbox" ${musicState.autoSuggestScenePlanOnImport !== false ? 'checked' : ''} />
@@ -3565,8 +4199,9 @@
             <p class="field-help">この歌詞が後続のシーン画像作成で重要な参照になります。必要なら手動で編集します。</p>
             <textarea id="musicLyricsText" data-music-field="lyricsText" class="prompt-textarea music-lyrics-textarea" rows="10" placeholder="歌詞・楽曲プラン作成を実行すると、ここに歌詞案が入ります。">${escapeHtml(musicState.lyricsText || '')}</textarea>
             <div class="character-ref-options">
+              <button id="musicLyricsRegenerateBtn" class="detail-action-btn secondary" type="button" ${musicPlanGenerationBusy ? 'disabled' : ''}>${musicPlanGenerationBusy ? '⏳ 再生成中...' : '✍️ 歌詞だけ再生成'}</button>
               <button id="musicLyricsTranslateBtn" data-music-translate="lyricsText" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
-              ${musicState.lyricsText ? '<button id="musicPlanClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
+              ${musicState.lyricsText ? '<button id="musicPlanClearBtn" class="detail-action-btn secondary" type="button">歌詞をクリア</button>' : ''}
             </div>
           </section>
         </div>
@@ -3577,6 +4212,7 @@
             <p class="field-help">ACE-Step 等でそのまま使う想定のタグ群です。ジャンル、BPM、楽器、声質、ムードを含めます。</p>
             <textarea id="musicTagsText" data-music-field="tagsText" class="prompt-textarea" rows="6" placeholder="例: city pop, emotional, female vocal, 118 bpm, shimmering synth, cinematic">${escapeHtml(musicState.tagsText || '')}</textarea>
             <div class="character-ref-options">
+              <button id="musicTagsRegenerateBtn" class="detail-action-btn secondary" type="button" ${musicPlanGenerationBusy ? 'disabled' : ''}>${musicPlanGenerationBusy ? '⏳ 再生成中...' : '🏷️ タグだけ再生成'}</button>
               <button id="musicTagsTranslateBtn" data-music-translate="tagsText" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
             </div>
           </section>
@@ -3632,7 +4268,16 @@
                 <p id="musicTrimSummary" class="field-help music-trim-summary">元音声 ${escapeHtml(trimRange.durationSec.toFixed(1))} 秒 / 採用区間 ${escapeHtml(trimRange.keepDurationSec.toFixed(1))} 秒。不要部分を削って、今の音声を短くできます。</p>
                 <div class="character-ref-options">
                   <button id="musicAudioTrimBtn" class="detail-action-btn secondary compact" type="button" ${musicAudioTrimBusy ? 'disabled' : ''}>${musicAudioTrimBusy ? '⏳ トリミング中...' : '✂️ トリミング'}</button>
-                  <button id="musicAudioClearBtn" class="detail-action-btn secondary compact" type="button">クリア</button>
+                  <button id="musicAudioClearBtn" class="detail-action-btn secondary compact" type="button">音声をクリア</button>
+                </div>
+                <div class="music-repaint-block">
+                  <h4>🎨 リペイント</h4>
+                  <p class="field-help">上の開始/終了スライダーと数値入力をそのまま兼用し、指定区間だけを再生成します。ACE-Step API 接続時のみ利用できます。</p>
+                  <p class="field-help music-trim-summary">現在の指定区間 ${escapeHtml(trimRange.startSec.toFixed(1))}〜${escapeHtml(trimRange.endSec.toFixed(1))} 秒（${escapeHtml(trimRange.keepDurationSec.toFixed(1))} 秒）をリペイントします。</p>
+                  <div class="character-ref-options">
+                    <button id="musicAudioRepaintBtn" class="detail-action-btn secondary compact" type="button" ${(musicAudioRepaintBusy || !aceStepAvailable) ? 'disabled' : ''}>${musicAudioRepaintBusy ? '⏳ リペイント中...' : '🎨 リペイント'}</button>
+                    ${aceStepAvailable ? '' : '<span class="field-help">ACE-Step API 接続時に有効になります。</span>'}
+                  </div>
                 </div>
               </div>
             ` : '<p class="field-help">まだ音声は設定されていません。</p>'}
@@ -3665,6 +4310,12 @@
     const pipeline = getSelectedPipelineOption(preset);
     const notice = sceneState.notice;
     const prompts = getSceneImageDisplayPrompts();
+    const workflowMode = getSelectedSceneVideoWorkflowMode();
+    const averageSceneSec = getSceneCountAverageDurationSec(workflowMode);
+    const recommendedSceneCount = getRecommendedSceneCountForDuration(getSceneImageEffectiveDurationSec(), workflowMode);
+    const workflowLabel = isLtxSceneVideoWorkflowMode(workflowMode) ? 'LTX' : 'Qwen2.2 / 標準';
+    const sceneVisualStyle = normalizeSceneVisualStyle(sceneState.visualStyle);
+    const hasScenePromptDraft = prompts.some((item) => !!String(item?.prompt || '').trim());
     const selected = getSelectedScenePromptItem() || prompts[0] || null;
     const promptGeneratedAt = sceneState.lastPromptGeneratedAt ? formatDateTime(sceneState.lastPromptGeneratedAt) : '未生成';
     const referenceFiles = getSceneImageReferenceFilenames();
@@ -3692,7 +4343,6 @@
                 <div class="canvas-label">STEPの役割</div>
                 <h3>${escapeHtml(step.title)}</h3>
               </div>
-              <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
             <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
@@ -3709,7 +4359,15 @@
                 <span class="field-label">最終作成日時</span>
                 <input class="text-input" type="text" value="${escapeHtml(promptGeneratedAt)}" disabled />
               </label>
+              <label class="preset-select-group">
+                <span class="field-label">画風 / 質感</span>
+                <select id="sceneVisualStyleSelect" class="select-input compact-select">
+                  ${SCENE_VISUAL_STYLE_OPTIONS.map((option) => `<option value="${escapeHtml(option.value)}" ${sceneVisualStyle === option.value ? 'selected' : ''}>${escapeHtml(option.label)}</option>`).join('')}
+                </select>
+              </label>
             </div>
+            <p class="field-help scene-flow-guide">音楽STEPから最初に入るときは、参照尺と ${escapeHtml(workflowLabel)} の平均 ${escapeHtml(String(averageSceneSec))} 秒/scene を基準に初期シーン数 ${escapeHtml(String(recommendedSceneCount))} を設定します。シーン数は後で手動変更できます。</p>
+            <p class="field-help">選んだ画風を、シーンプロンプト作成と画像生成の両方に反映します。${escapeHtml(getSceneVisualStyleLabel(sceneVisualStyle))}を選ぶと、背景側の質感もその方向へ寄せます。</p>
             <ul class="detail-list">
               <li><strong>制作フロープラン</strong>${escapeHtml(pipeline?.label || '未選択')}</li>
               <li><strong>シナリオ参照</strong>${escapeHtml(storyState.scenarioText ? 'あり' : '未準備')}</li>
@@ -3735,13 +4393,15 @@
           <section class="detail-block">
             <h3>シーンプロンプト作成</h3>
             <p class="field-help">シナリオ・確定歌詞・キャラクタ情報から、各シーンごとの静止画向けプロンプトをまとめて作成します。</p>
+            <p class="field-help">「🧩 尺・遷移を自動提案」は現在のシーン数を維持したまま、シーンプロンプト・歌詞・シナリオに合わせて各シーンの尺と遷移を調整します。</p>
             <p class="field-help">${escapeHtml(getPipelineTransitionGuidance(String(state.selectedPipelinePresetId || ''), getSelectedSceneVideoWorkflowMode()))}</p>
             <div class="character-ref-options">
               <button id="sceneImageStepRunBtn" class="detail-action-btn primary" type="button" ${(scenePromptGenerationBusy || scenePlanGenerationBusy || sceneImageGenerationBusy) ? 'disabled' : ''}>${(scenePromptGenerationBusy || scenePlanGenerationBusy || sceneImageGenerationBusy) ? '⏳ 実行中...' : '🖼️ このSTEPをまとめて実行'}</button>
               <button id="scenePromptGenerateBtn" class="detail-action-btn secondary" type="button" ${scenePromptGenerationBusy ? 'disabled' : ''}>${scenePromptGenerationBusy ? '⏳ シーンプロンプト生成中...' : '🤖 シーンプロンプト作成'}</button>
               <button id="scenePlanSuggestBtn" class="detail-action-btn secondary" type="button" ${(scenePromptGenerationBusy || scenePlanGenerationBusy) ? 'disabled' : ''}>${scenePlanGenerationBusy ? '⏳ 提案中...' : '🧩 尺・遷移を自動提案'}</button>
-              ${sceneState.scenePrompts.length ? '<button id="scenePromptClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
+              ${sceneState.scenePrompts.length ? '<button id="scenePromptClearBtn" class="detail-action-btn secondary" type="button">シーンプロンプトをクリア</button>' : ''}
             </div>
+            ${!hasScenePromptDraft ? '<div class="character-inline-notice warning scene-plan-inline-notice">先に「シーンプロンプト作成」を実行すると、各シーン内容に沿った尺提案になりやすくなります。</div>' : ''}
           </section>
 
           <section class="detail-block">
@@ -3776,7 +4436,7 @@
               <button id="sceneImageGenerateAllBtn" class="detail-action-btn secondary" type="button" ${sceneImageGenerationBusy ? 'disabled' : ''}>${sceneImageGenerationBusy ? '⏳ 画像生成中...' : '🖼️ 全シーン画像を再生成'}</button>
               <button id="sceneImageGenerateBtn" class="detail-action-btn secondary" type="button" ${sceneImageGenerationBusy ? 'disabled' : ''}>${sceneImageGenerationBusy ? '⏳ 画像生成中...' : '🖼️ このシーン画像を生成'}</button>
               ${sceneImageGenerationBusy ? '<button id="sceneImageCancelBtn" class="detail-action-btn secondary" type="button">⏹️ 中止</button>' : ''}
-              ${selected?.image?.previewUrl ? '<button id="sceneImageClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
+              ${selected?.image?.previewUrl ? '<button id="sceneImageClearBtn" class="detail-action-btn secondary" type="button">このシーン画像をクリア</button>' : ''}
             </div>
             <div class="character-output-card">
               ${selected?.image?.previewUrl ? `
@@ -3813,6 +4473,7 @@
     const lastGeneratedText = sceneVideoState.lastGeneratedAt ? formatDateTime(sceneVideoState.lastGeneratedAt) : '未生成';
     const workflowMode = String(sceneVideoState.workflowMode || getDefaultSceneVideoWorkflowMode() || 'auto');
     const isLtxWorkflow = isLtxSceneVideoWorkflowMode(workflowMode);
+    const inheritedVisualStyleLabel = getSceneVisualStyleLabel(state.sceneImageStep.visualStyle);
     const sceneTabs = items.map((item, index) => `
       <button class="scene-prompt-chip scene-video-chip ${index === selectedIndex ? 'active' : ''}" type="button" data-scene-video-select="${index}">
         <div class="scene-prompt-chip-thumb-wrap">
@@ -3836,7 +4497,6 @@
                 <div class="canvas-label">STEPの役割</div>
                 <h3>${escapeHtml(step.title)}</h3>
               </div>
-              <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
             <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
@@ -3863,6 +4523,7 @@
             <ul class="detail-list">
               <li><strong>制作フロープラン</strong>${escapeHtml(pipeline?.label || '未選択')}</li>
               <li><strong>既定の生成方式</strong>${escapeHtml(getSceneVideoWorkflowLabel(getDefaultSceneVideoWorkflowMode(), { isDefault: true }))}</li>
+              <li><strong>引き継ぐ画風</strong>${escapeHtml(inheritedVisualStyleLabel)}</li>
               <li><strong>シーン画像参照</strong>${escapeHtml(items.filter((item) => item?.image?.filename).length ? `${items.filter((item) => item?.image?.filename).length}シーン分` : '未準備')}</li>
               <li><strong>音楽同期メモ</strong>${escapeHtml(state.musicStep.generatedAudio?.filename || state.musicStep.lyricsText ? 'あり' : '未準備')}</li>
             </ul>
@@ -3893,7 +4554,7 @@
         <div class="detail-grid">
           <section class="detail-block">
             <h3>${escapeHtml(selected ? `Scene ${selected.sceneIndex} 動画プロンプト` : '動画プロンプト')}</h3>
-            <p class="field-help">シーン画像を動かすためのプロンプトです。静止画の内容を保ちながら、穏やかな動きやカメラ演出を追記します。</p>
+            <p class="field-help">シーン画像を動かすためのプロンプトです。静止画の内容を保ちながら、穏やかな動きやカメラ演出を追記します。シーン画像作成で選んだ「${escapeHtml(inheritedVisualStyleLabel)}」の画風も引き継ぎます。</p>
             <textarea id="sceneVideoPromptText" class="prompt-textarea scene-prompt-textarea" rows="10" placeholder="シーン画像生成後、ここで動画用の動き指示を調整します。">${escapeHtml(selected?.prompt || '')}</textarea>
             <div class="character-ref-options">
               <button id="sceneVideoPromptTranslateBtn" class="detail-action-btn secondary compact" type="button">🌐 翻訳</button>
@@ -3928,7 +4589,7 @@
               <button id="sceneVideoGenerateAllBtn" class="detail-action-btn secondary" type="button" ${sceneVideoGenerationBusy ? 'disabled' : ''}>${sceneVideoGenerationBusy ? '⏳ 動画生成中...' : '🎬 全シーン動画を再生成'}</button>
               <button id="sceneVideoGenerateBtn" class="detail-action-btn secondary" type="button" ${sceneVideoGenerationBusy ? 'disabled' : ''}>${sceneVideoGenerationBusy ? '⏳ 動画生成中...' : '🎬 このシーン動画を生成'}</button>
               ${sceneVideoGenerationBusy ? '<button id="sceneVideoCancelBtn" class="detail-action-btn secondary" type="button">⏹️ 中止</button>' : ''}
-              ${selected?.video?.previewUrl ? '<button id="sceneVideoClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
+              ${selected?.video?.previewUrl ? '<button id="sceneVideoClearBtn" class="detail-action-btn secondary" type="button">このシーン動画をクリア</button>' : ''}
             </div>
             <div class="scene-video-preview-grid">
               <div class="character-output-card">
@@ -3972,6 +4633,8 @@
     const audio = state.musicStep.generatedAudio;
     const notice = finalState.notice;
     const lastRenderedText = finalState.lastRenderedAt ? formatDateTime(finalState.lastRenderedAt) : '未生成';
+    const generatedMvCount = generatedMvGallery.totalCount || generatedMvGallery.items.length;
+    const generatedMvVisibleCount = generatedMvGallery.items.length;
     const sourceClipList = clipItems.map((item) => `<li>Scene ${escapeHtml(item.sceneIndex)} / ${escapeHtml(item.video?.filename || '')}</li>`).join('');
 
     return `
@@ -3983,7 +4646,6 @@
                 <div class="canvas-label">STEPの役割</div>
                 <h3>${escapeHtml(step.title)}</h3>
               </div>
-              <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
             <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
@@ -4006,6 +4668,7 @@
               <li><strong>シーン動画</strong>${escapeHtml(clipItems.length ? '結合可能' : '未準備')}</li>
               <li><strong>音楽素材</strong>${escapeHtml(audio?.filename || '未準備')}</li>
               <li><strong>出力対象</strong>${escapeHtml(finalState.finalVideo?.filename || finalState.clipVideo?.filename || '未生成')}</li>
+              <li><strong>保存済みMV</strong>${escapeHtml(generatedMvCount ? `${generatedMvVisibleCount}/${generatedMvCount}件表示中` : '未取得')}</li>
             </ul>
           </section>
 
@@ -4019,10 +4682,10 @@
               <div class="final-mv-action-row final-mv-action-row-pair">
                 <button id="finalMvConcatBtn" class="detail-action-btn secondary" type="button" ${finalMvRenderBusy ? 'disabled' : ''}>${finalMvRenderBusy ? '⏳ 処理中...' : '🎞️ シーンクリップを結合'}</button>
                 <span class="final-mv-action-arrow">→</span>
-                <button id="finalMvRenderBtn" class="detail-action-btn primary" type="button" ${finalMvRenderBusy ? 'disabled' : ''}>${finalMvRenderBusy ? '⏳ 処理中...' : '🎵 音楽を合成して完成MV生成'}</button>
+                <button id="finalMvRenderBtn" class="detail-action-btn primary" type="button" ${finalMvRenderBusy ? 'disabled' : ''}>${finalMvRenderBusy ? '⏳ 処理中...' : '🎵 音楽を合成してMV生成'}</button>
               </div>
               <div class="final-mv-action-row final-mv-action-row-single">
-                ${(finalState.clipVideo?.previewUrl || finalState.finalVideo?.previewUrl) ? '<button id="finalMvClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
+                ${(finalState.clipVideo?.previewUrl || finalState.finalVideo?.previewUrl) ? '<button id="finalMvClearBtn" class="detail-action-btn secondary" type="button">出力動画をクリア</button>' : ''}
               </div>
             </div>
           </section>
@@ -4062,8 +4725,22 @@
               <li><strong>映像結合</strong>${escapeHtml(finalState.clipVideo?.filename || '未生成')}</li>
               <li><strong>音楽合成</strong>${escapeHtml(finalState.finalVideo?.filename ? '完了' : '未実行')}</li>
               <li><strong>使用音声</strong>${escapeHtml(audio?.filename || '未生成')}</li>
-              <li><strong>再編集導線</strong>${escapeHtml('必要なら scene_video / scene_image / music STEP へ戻って差し替えできます。')}</li>
+              <li><strong>再編集導線</strong>${escapeHtml('scene_video / scene_image / music STEP へ戻って差し替えできます。')}</li>
             </ul>
+          </section>
+
+          <section class="detail-block">
+            <h3>生成済みMV一覧</h3>
+            <p class="field-help">生成済みMV一覧は専用画面へ切り替えて表示します。アップロード登録・フォルダ取込・タイトル / メモ管理も専用画面側で行えます。</p>
+            <ul class="detail-list">
+              <li><strong>表示件数</strong>${escapeHtml(generatedMvCount ? `${generatedMvVisibleCount}/${generatedMvCount}件` : '未取得')}</li>
+              <li><strong>最終取得</strong>${escapeHtml(generatedMvGallery.loadedAt ? formatDateTime(generatedMvGallery.loadedAt) : '未取得')}</li>
+              <li><strong>表示方法</strong>${escapeHtml('ブラウザ画面を切り替えて専用ページで表示')}</li>
+            </ul>
+            <div class="generated-mv-links">
+              <a class="detail-action-btn secondary" href="/mv_library.html">📚 生成済みMV一覧画面を開く</a>
+              <button id="generatedMvRefreshBtn" class="detail-action-btn secondary compact" type="button" ${generatedMvGallery.loading ? 'disabled' : ''}>${generatedMvGallery.loading ? '更新中...' : '件数だけ更新'}</button>
+            </div>
           </section>
 
         </div>
@@ -4124,7 +4801,6 @@
                 <div class="canvas-label">STEPの役割</div>
                 <h3>${escapeHtml(step.title)}</h3>
               </div>
-              <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
             <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             ${notice ? `<div class="character-inline-notice ${escapeHtml(notice.tone || 'info')}">${escapeHtml(notice.message || '')}</div>` : ''}
@@ -4150,7 +4826,7 @@
               <button id="characterPromptTranslateBtn" class="detail-action-btn secondary compact" type="button" title="プロンプトを翻訳（英⇔日）">🌐 翻訳</button>
               <button id="characterImageGenerateBtn" class="detail-action-btn secondary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>${characterImageGenerationBusy ? '⏳ 生成中...' : 'キャラ合成画像を作成'}</button>
               <button id="characterImageTextGenerateBtn" class="detail-action-btn secondary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>${characterImageGenerationBusy ? '⏳ 生成中...' : 'テキストから新規作成'}</button>
-              ${characterState.characterImage ? `<button id="characterImageClearBtn" class="detail-action-btn secondary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>クリア</button>` : ''}
+              ${characterState.characterImage ? `<button id="characterImageClearBtn" class="detail-action-btn secondary" type="button" ${characterImageGenerationBusy ? 'disabled' : ''}>キャラ合成画像をクリア</button>` : ''}
             </div>
           </section>
 
@@ -4163,7 +4839,7 @@
                 <span>背景なし</span>
               </label>
               <button id="characterSheetGenerateBtn" class="detail-action-btn character-sheet-btn" type="button">キャラシートを作成</button>
-              ${characterState.characterSheetImage ? '<button id="characterSheetClearBtn" class="detail-action-btn secondary" type="button">クリア</button>' : ''}
+              ${characterState.characterSheetImage ? '<button id="characterSheetClearBtn" class="detail-action-btn secondary" type="button">キャラシートをクリア</button>' : ''}
             </div>
             <div class="character-output-card">
               ${characterState.characterSheetImage?.previewUrl ? `
@@ -4197,6 +4873,7 @@
                   <img src="${escapeHtml(characterState.characterImage.previewUrl)}" alt="character composite" />
                 </button>
                 ${isTextOnlyCharacterImageAsset(characterState.characterImage) ? '<div class="character-inline-notice warning">この画像は「テキストから新規作成」の T2I 出力です。後続参照に使う前に、@登録キャラ や ref1/ref2/ref3 を使って「キャラ合成画像を作成」で正しいキャラ合成へ更新することを推奨します。</div>' : ''}
+                ${String(characterState.characterImage?.sourceFilename || '').trim() ? '<div class="character-inline-notice info">この画像は「動画比率に整える」後の表示用画像です。ref に使うときは元のキャラ合成画像を優先して登録します。</div>' : ''}
                 <div class="character-output-meta">${escapeHtml(characterState.characterImage.filename || 'キャラ合成画像')}</div>
                 <div class="character-ref-options">
                   <button class="detail-action-btn secondary compact" type="button" data-character-image-ref-slot="0">ref1に使う</button>
@@ -4290,6 +4967,7 @@
     if (String(step.id) === 'final_mv') {
       els.detailBody.innerHTML = renderFinalMvWorkspace(step, null);
       syncFinalMvActionButtonWidths();
+      requestGeneratedMvGalleryRefresh();
       return;
     }
 
@@ -4313,7 +4991,6 @@
                 <div class="canvas-label">STEPの役割</div>
                 <h3>${escapeHtml(step.title)}</h3>
               </div>
-              <span class="flow-mini-badge">${escapeHtml(step.short || '')}</span>
             </div>
             <p class="detail-objective">${escapeHtml(step.objective || '')}</p>
             <ul class="detail-list">
@@ -4419,7 +5096,16 @@
   }
 
   function selectStep(stepId) {
+    const previousStepId = String(state.selectedStepId || '');
     state.selectedStepId = String(stepId || '');
+    if (previousStepId === 'music' && state.selectedStepId === 'scene_image' && !hasExistingScenePlanDraft()) {
+      const workflowMode = getSelectedSceneVideoWorkflowMode();
+      const adjustment = autoApplyRecommendedSceneCountFromMusicTransition({ workflowMode, rerender: false, save: false });
+      if (adjustment) {
+        const workflowLabel = isLtxSceneVideoWorkflowMode(workflowMode) ? 'LTX' : 'Qwen2.2 / 標準';
+        setSceneImageNotice(`${workflowLabel} の平均尺 ${adjustment.averageSceneSec} 秒を基準に、シーン数を ${adjustment.recommendedSceneCount} に設定しました`, 'info');
+      }
+    }
     state.canvas.updatedAt = Date.now();
     renderAll();
     scheduleSave();
@@ -4921,6 +5607,8 @@
         type: payload.type || 'output',
         workflow: payload.fit_mode || characterState.characterImage?.workflow || '',
         sourceFilename: payload.source_filename || filename,
+        sourcePreviewUrl: String(characterState.characterImage?.previewUrl || ''),
+        sourceOriginalName: String(characterState.characterImage?.originalName || characterState.characterImage?.filename || 'キャラ合成画像'),
       };
       setCharacterNotice('キャラ合成画像を動画比率に整えました', 'success');
       state.canvas.updatedAt = Date.now();
@@ -5241,6 +5929,11 @@
         return;
       }
 
+      if (event.target.closest('#storyWorldNotesClearBtn')) {
+        clearStoryWorldNotes();
+        return;
+      }
+
       if (event.target.closest('#storyScenarioTranslateBtn')) {
         try {
           await translateStoryField('scenarioText', '翻訳するシナリオがありません');
@@ -5261,6 +5954,42 @@
           await generateMusicPlan();
         } catch (error) {
           setMusicNotice(error.message || '音楽プラン生成に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('#musicLyricsRegenerateBtn')) {
+        try {
+          await generateMusicPlan({
+            updateLyrics: true,
+            updateTags: false,
+            updateArrangementNotes: false,
+            updateTitle: false,
+            updateBpm: false,
+            updateKeySignature: false,
+            successMessage: '歌詞だけ再生成しました',
+          });
+        } catch (error) {
+          setMusicNotice(error.message || '歌詞の再生成に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('#musicTagsRegenerateBtn')) {
+        try {
+          await generateMusicPlan({
+            updateLyrics: false,
+            updateTags: true,
+            updateArrangementNotes: false,
+            updateTitle: false,
+            updateBpm: false,
+            updateKeySignature: false,
+            successMessage: 'タグだけ再生成しました',
+          });
+        } catch (error) {
+          setMusicNotice(error.message || 'タグの再生成に失敗しました', 'warning');
           renderDetail();
         }
         return;
@@ -5301,6 +6030,16 @@
           await trimMusicAudio();
         } catch (error) {
           setMusicNotice(error.message || '音声トリミングに失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('#musicAudioRepaintBtn')) {
+        try {
+          await repaintMusicAudio();
+        } catch (error) {
+          setMusicNotice(error.message || '音声のリペイントに失敗しました', 'warning');
           renderDetail();
         }
         return;
@@ -5517,6 +6256,74 @@
         return;
       }
 
+      if (event.target.closest('#generatedMvRefreshBtn')) {
+        try {
+          await refreshGeneratedMvGallery({ append: false });
+        } catch (error) {
+          setFinalMvNotice(error.message || '生成済みMV一覧の更新に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('#generatedMvLoadMoreBtn')) {
+        try {
+          await refreshGeneratedMvGallery({ append: true });
+        } catch (error) {
+          setFinalMvNotice(error.message || '生成済みMV一覧の追加表示に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('#mvLibraryUploadBtn')) {
+        try {
+          const fileInput = els.detailBody?.querySelector('#mvLibraryUploadInput');
+          const titleInput = els.detailBody?.querySelector('#mvLibraryUploadTitleInput');
+          const memoInput = els.detailBody?.querySelector('#mvLibraryUploadMemoInput');
+          const file = fileInput?.files?.[0] || null;
+          await uploadGeneratedMvLibraryFile(file, {
+            title: titleInput?.value || '',
+            memo: memoInput?.value || '',
+          });
+        } catch (error) {
+          setFinalMvNotice(error.message || 'MVファイルの登録に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('#mvLibraryImportBtn')) {
+        try {
+          const pathInput = els.detailBody?.querySelector('#mvLibraryImportPathInput');
+          const recursiveInput = els.detailBody?.querySelector('#mvLibraryImportRecursiveInput');
+          await importGeneratedMvLibraryFolder(pathInput?.value || '', {
+            recursive: !!recursiveInput?.checked,
+          });
+        } catch (error) {
+          setFinalMvNotice(error.message || 'MVフォルダ取込に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
+      if (event.target.closest('[data-mv-library-save]')) {
+        try {
+          const card = event.target.closest('[data-mv-library-card]');
+          if (!card) throw new Error('保存対象が見つかりません');
+          await saveGeneratedMvLibraryMetadata({
+            filename: card.getAttribute('data-mv-filename') || '',
+            subfolder: card.getAttribute('data-mv-subfolder') || '',
+            title: card.querySelector('[data-mv-title-input]')?.value || '',
+            memo: card.querySelector('[data-mv-memo-input]')?.value || '',
+          });
+        } catch (error) {
+          setFinalMvNotice(error.message || 'MVメタデータの保存に失敗しました', 'warning');
+          renderDetail();
+        }
+        return;
+      }
+
       if (event.target.closest('#finalMvAutoBtn')) {
         try {
           await autoCreateFinalMv();
@@ -5600,15 +6407,16 @@
           return;
         }
         try {
+          const refAsset = getCharacterImageRefAsset(currentImage);
           setCharacterRefSlotFromAsset(index, {
-            filename: currentImage.filename,
-            originalName: currentImage.filename || 'キャラ合成画像',
-            previewUrl: currentImage.previewUrl || '',
+            filename: refAsset?.filename || currentImage.filename,
+            originalName: refAsset?.originalName || currentImage.filename || 'キャラ合成画像',
+            previewUrl: refAsset?.previewUrl || currentImage.previewUrl || '',
           }, {
             clearCharacterImage: false,
             clearCharacterSheet: index === 0,
             confirmReplace: true,
-            noticeMessage: `キャラ合成画像を ref${index + 1} に設定しました`,
+            noticeMessage: `${String(currentImage?.sourceFilename || '').trim() ? '元のキャラ合成画像を ' : 'キャラ合成画像を '}ref${index + 1} に設定しました`,
           });
         } catch (error) {
           setCharacterNotice(error.message || 'キャラ合成画像のref設定に失敗しました', 'warning');
@@ -5661,6 +6469,15 @@
           renderDetail();
         }
         event.target.value = '';
+        return;
+      }
+
+      if (event.target.matches('#mvLibraryUploadInput')) {
+        const file = event.target.files?.[0] || null;
+        const titleInput = els.detailBody?.querySelector('#mvLibraryUploadTitleInput');
+        if (file && titleInput && !String(titleInput.value || '').trim()) {
+          titleInput.value = getGeneratedMvDefaultTitle(file.name || '');
+        }
         return;
       }
 
@@ -5789,6 +6606,13 @@
 
       if (event.target.matches('#sceneUseCharacterContext')) {
         state.sceneImageStep.useCharacterContext = !!event.target.checked;
+        scheduleSave();
+        return;
+      }
+
+      if (event.target.matches('#sceneVisualStyleSelect')) {
+        state.sceneImageStep.visualStyle = normalizeSceneVisualStyle(event.target.value);
+        state.canvas.updatedAt = Date.now();
         scheduleSave();
         return;
       }
